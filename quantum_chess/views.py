@@ -213,7 +213,12 @@ def quantum_split(request):
         # and add it to the quantum superposition positions
         board.remove_piece_at(from_sq)
         game_obj.fen_position = board.fen()
+        
+        # Switch turn after quantum split
+        game_obj.current_turn = not game_obj.current_turn
+        
         game_obj.save()
+
 
         
         # Record the split move
@@ -237,8 +242,10 @@ def quantum_split(request):
             'to_square1': to_square1,
             'to_square2': to_square2,
             'fen': game_obj.fen_position,
-            'quantum_pieces': quantum_pieces_data
+            'quantum_pieces': quantum_pieces_data,
+            'turn': 'white' if game_obj.current_turn else 'black',
         })
+
 
         
     except Exception as e:
