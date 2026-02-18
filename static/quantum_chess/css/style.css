@@ -1,0 +1,62 @@
+/* Quantum Chess Static Files */
+
+/* Additional custom styles for Quantum Chess */
+
+/* Custom piece styling */
+.chessboard {
+    border: 2px solid #333;
+}
+
+/* Quantum mode indicator */
+.quantum-active {
+    box-shadow: 0 0 20px rgba(102, 126, 234, 0.8);
+}
+
+/* Animations */
+@keyframes quantum-glow {
+    0%, 100% { box-shadow: 0 0 10px rgba(102, 126, 234, 0.5); }
+    50% { box-shadow: 0 0 25px rgba(102, 126, 234, 1); }
+}
+
+.quantum-piece {
+    animation: quantum-glow 2s infinite;
+}
+
+/* Responsive board */
+@media (max-width: 576px) {
+    #board {
+        width: 100% !important;
+        max-width: 320px;
+    }
+}
+
+@media (min-width: 768px) {
+    #board {
+        max-width: 400px;
+    }
+}
+
+@media (min-width: 992px) {
+    #board {
+        max-width: 500px;
+    }
+}
+
+/* Move highlight */
+.highlight-white {
+    background-color: rgba(255, 255, 0, 0.3) !important;
+}
+
+.highlight-black {
+    background-color: rgba(255, 255, 0, 0.3) !important;
+}
+
+/* Last move highlight */
+.last-move {
+    background-color: rgba(0, 255, 0, 0.3) !important;
+}
+
+/* Check highlight */
+.in-check {
+    background-color: rgba(255, 0, 0, 0.5) !important;
+}

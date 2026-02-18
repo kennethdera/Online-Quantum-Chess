@@ -1,0 +1,16 @@
+# Django and REST Framework
+Django>=4.2,<5.0
+djangorestframework>=3.16.1
+
+# Quantum Computing
+qiskit>=1.0.0
+qiskit-ibm-provider>=0.7.0
+
+# Chess
+chess>=1.9.0
+
+# Optional: For better quantum simulation
+numpy>=1.24.0
+
+# For development
+python-dotenv>=1.0.0

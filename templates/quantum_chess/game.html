@@ -1,0 +1,506 @@
+{% extends 'quantum_chess/base.html' %}
+
+{% block title %}Quantum Chess - Game {{ game.id }}{% endblock %}
+
+{% block extra_css %}
+<style>
+    #board {
+        width: 100%;
+        max-width: 500px;
+        margin: 0 auto;
+    }
+    
+    .game-container {
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+    
+    .quantum-toggle {
+        position: relative;
+        width: 60px;
+        height: 30px;
+        background: rgba(255, 255, 255, 0.2);
+        border-radius: 15px;
+        cursor: pointer;
+        transition: all 0.3s;
+    }
+    
+    .quantum-toggle.active {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+    }
+    
+    .quantum-toggle::after {
+        content: '';
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 26px;
+        height: 26px;
+        background: white;
+        border-radius: 50%;
+        transition: all 0.3s;
+    }
+    
+    .quantum-toggle.active::after {
+        left: 32px;
+    }
+    
+    .game-status {
+        font-size: 1.2em;
+        font-weight: bold;
+    }
+    
+    .piece-info {
+        background: rgba(0, 0, 0, 0.3);
+        border-radius: 10px;
+        padding: 10px;
+        margin-top: 10px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="game-container">
+    <div class="row">
+        <div class="col-lg-8">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span class="game-status">
+                        {% if game.current_turn %}White's Turn{% else %}Black's Turn{% endif %}
+                    </span>
+                    <div class="d-flex align-items-center gap-3">
+                        <span>Quantum Mode:</span>
+                        <div class="quantum-toggle {% if game.quantum_mode %}active{% endif %}" id="quantumToggle"></div>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div id="board"></div>
+                </div>
+
+                <div class="card-footer">
+                    <div class="d-flex justify-content-between">
+                        <button class="btn btn-outline-light" id="flipBoard">Flip Board</button>
+                        <button class="btn btn-outline-light" id="resetGame">New Game</button>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card mt-3">
+                <div class="card-header">
+                    <h5 class="mb-0">Instructions</h5>
+                </div>
+                <div class="card-body">
+                    <ul class="mb-0">
+                        <li><strong>Click</strong> a piece to select it</li>
+                        <li><strong>Click</strong> a square to move</li>
+                        <li>Hold <strong>Shift</strong> or click Quantum Mode for quantum moves</li>
+                        <li>In quantum mode, you can split pieces or entangle them</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-lg-4">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">Game Info</h5>
+                </div>
+                <div class="card-body">
+                    <div class="game-info mb-3">
+                        <p><strong>Game ID:</strong> {{ game.id }}</p>
+                        <p><strong>Status:</strong> {{ game.get_status_display }}</p>
+                        <p><strong>FEN:</strong> <small>{{ game.fen_position }}</small></p>
+                    </div>
+                    
+                    <h6>Move History</h6>
+                    <div class="move-history" id="moveHistory">
+                        <p class="text-muted">No moves yet</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card mt-3">
+                <div class="card-header">
+                    <h5 class="mb-0">Quantum Pieces</h5>
+                </div>
+                <div class="card-body">
+                    <div id="quantumPieces">
+                        <p class="text-muted">No quantum pieces</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card mt-3" id="quantumControls" style="display: none;">
+                <div class="card-header">
+                    <h5 class="mb-0">Quantum Controls</h5>
+                </div>
+                <div class="card-body">
+                    <p class="small text-muted mb-2">Select a piece, then choose two target squares for superposition.</p>
+                    <button class="btn btn-sm btn-outline-info w-100 mb-2" id="cancelQuantum">Cancel</button>
+                </div>
+            </div>
+
+            
+            <div class="card mt-3">
+                <div class="card-header">
+                    <h5 class="mb-0">Legend</h5>
+                </div>
+                <div class="card-body">
+                    <ul class="mb-0 small">
+                        <li>🎯 <strong>Click</strong> - Select piece</li>
+                        <li>⬇️ <strong>Click</strong> - Move to square</li>
+                        <li>🔮 <strong>Shift</strong> - Quantum mode</li>
+                        <li>📊 <strong>Split</strong> - Two positions</li>
+                        <li>⛓️ <strong>Entangle</strong> - Link pieces</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // Game configuration
+    var gameId = {{ game.id }};
+    var board = null;
+    var game = new Chess('{{ game.fen_position }}');
+    var quantumMode = {{ game.quantum_mode|yesno:"true,false" }};
+    var quantumPieces = {{ game.quantum_pieces|safe|default:"[]" }};
+    var $status = $('#status');
+    var $fen = $('#fen');
+    var $pgn = $('#pgn');
+    
+    // Quantum split state
+    var quantumSplitState = {
+        active: false,
+        fromSquare: null,
+        firstTarget: null
+    };
+    
+    // Initialize board
+    function onDragStart (source, piece, position, orientation) {
+        // Do not pick up pieces if the game is over
+        if (game.game_over()) return false;
+
+        // Only pick up pieces for the side to move
+        if ((game.turn() === 'w' && piece.search(/^b/) !== -1) ||
+            (game.turn() === 'b' && piece.search(/^w/) !== -1)) {
+            return false;
+        }
+        
+        // In quantum split mode, handle differently
+        if (quantumMode && quantumSplitState.active) {
+            return false; // Don't allow dragging in quantum split mode
+        }
+    }
+    
+    function onDrop (source, target) {
+        // Check if we're in quantum mode and doing a split
+        if (quantumMode && quantumSplitState.active) {
+            handleQuantumSplitDrop(source, target);
+            return 'snapback';
+        }
+        
+        // Normal move
+        var move = game.move({
+            from: source,
+            to: target,
+            promotion: 'q'
+        });
+
+        // Illegal move
+        if (move === null) return 'snapback';
+
+        updateStatus();
+        updateBoard();
+        
+        // Send move to server
+        $.ajax({
+            url: '{% url "quantum_chess:make_move" %}',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({
+                game_id: gameId,
+                from_square: source,
+                to_square: target,
+                promotion: 'q',
+                quantum_mode: quantumMode
+            }),
+            headers: {
+                'X-CSRFToken': '{{ csrf_token }}'
+            },
+            success: function(response) {
+                console.log('Move saved:', response);
+                if (response.fen) {
+                    game.load(response.fen);
+                    board.position(response.fen);
+                }
+            },
+            error: function(error) {
+                console.error('Error saving move:', error);
+            }
+        });
+    }
+    
+    function handleQuantumSplitDrop(source, target) {
+        if (!quantumSplitState.fromSquare) {
+            // First selection - the piece to split
+            var piece = game.get(source);
+            if (!piece) {
+                alert('No piece at this square!');
+                return;
+            }
+            quantumSplitState.fromSquare = source;
+            highlightSquare(source, 'selected');
+            $('#quantumControls .card-body').html(
+                '<p class="text-info">Piece selected: ' + source + '</p>' +
+                '<p class="small text-muted">Now click first target square</p>' +
+                '<button class="btn btn-sm btn-outline-info w-100" id="cancelQuantum">Cancel</button>'
+            );
+        } else if (!quantumSplitState.firstTarget) {
+            // Second selection - first target
+            quantumSplitState.firstTarget = target;
+            highlightSquare(target, 'target1');
+            $('#quantumControls .card-body').html(
+                '<p class="text-info">First target: ' + target + '</p>' +
+                '<p class="small text-muted">Now click second target square</p>' +
+                '<button class="btn btn-sm btn-outline-info w-100" id="cancelQuantum">Cancel</button>'
+            );
+        } else {
+            // Third selection - second target, perform split
+            performQuantumSplit(quantumSplitState.fromSquare, quantumSplitState.firstTarget, target);
+        }
+    }
+    
+    function performQuantumSplit(from, to1, to2) {
+        $.ajax({
+            url: '{% url "quantum_chess:quantum_split" %}',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({
+                game_id: gameId,
+                from_square: from,
+                to_square1: to1,
+                to_square2: to2
+            }),
+            headers: {
+                'X-CSRFToken': '{{ csrf_token }}'
+            },
+            success: function(response) {
+                console.log('Quantum split performed:', response);
+                if (response.fen) {
+                    game.load(response.fen);
+                    board.position(response.fen);
+                }
+                if (response.quantum_pieces) {
+                    quantumPieces = response.quantum_pieces;
+                    updateQuantumPiecesDisplay();
+                }
+                resetQuantumSplitState();
+                loadGameState();
+            },
+            error: function(error) {
+                console.error('Error performing quantum split:', error);
+                alert('Quantum split failed: ' + (error.responseJSON?.error || 'Unknown error'));
+                resetQuantumSplitState();
+            }
+        });
+    }
+    
+    function resetQuantumSplitState() {
+        quantumSplitState = {
+            active: false,
+            fromSquare: null,
+            firstTarget: null
+        };
+        $('#quantumControls').hide();
+        clearHighlights();
+    }
+    
+    function highlightSquare(square, type) {
+        var $square = $('#board .square-' + square);
+        var color = type === 'selected' ? '#f093fb' : (type === 'target1' ? '#f5576c' : '#4facfe');
+        $square.css('background', color);
+    }
+    
+    function clearHighlights() {
+        $('#board .square-55d, #board .square-55l').css('background', '');
+        board.position(game.fen());
+    }
+    
+    function updateBoard() {
+        board.position(game.fen());
+    }
+    
+    // Update the board position after the piece snap
+    function onSnapEnd () {
+        board.position(game.fen());
+    }
+    
+    function updateStatus () {
+        var status = '';
+        var moveColor = 'White';
+        
+        if (game.turn() === 'b') {
+            moveColor = 'Black';
+        }
+        
+        // Checkmate?
+        if (game.in_checkmate()) {
+            status = 'Game over, ' + moveColor + ' is in checkmate.';
+        }
+        
+        // Draw?
+        else if (game.in_draw()) {
+            status = 'Game over, drawn position';
+        }
+        
+        // Game still on
+        else {
+            status = moveColor + "'s turn";
+            
+            // Is player in check?
+            if (game.in_check()) {
+                status += ', ' + moveColor + ' is in check';
+            }
+        }
+        
+        $('.game-status').text(status);
+    }
+    
+    function updateQuantumPiecesDisplay() {
+        var $container = $('#quantumPieces');
+        if (!quantumPieces || quantumPieces.length === 0) {
+            $container.html('<p class="text-muted">No quantum pieces</p>');
+            return;
+        }
+        
+        var html = '';
+        quantumPieces.forEach(function(qp, index) {
+            html += '<div class="quantum-piece">';
+            html += '<strong>Piece: ' + qp.piece + '</strong><br>';
+            html += '<small>States:</small><br>';
+            for (var state in qp.qnum) {
+                var pos = qp.qnum[state][0];
+                var prob = Math.round(qp.qnum[state][1] * 100);
+                html += '<span class="quantum-position">' + pos + ' (' + prob + '%)</span>';
+            }
+            html += '</div>';
+        });
+        $container.html(html);
+    }
+    
+    function loadGameState() {
+        $.ajax({
+            url: '{% url "quantum_chess:get_game_state" game.id %}',
+            method: 'GET',
+            success: function(response) {
+                if (response.fen) {
+                    game.load(response.fen);
+                    board.position(response.fen);
+                }
+                if (response.quantum_pieces) {
+                    quantumPieces = response.quantum_pieces;
+                    updateQuantumPiecesDisplay();
+                }
+                updateStatus();
+            },
+            error: function(error) {
+                console.error('Error loading game state:', error);
+            }
+        });
+    }
+    
+    // Initialize
+    $(document).ready(function() {
+        var config = {
+            draggable: true,
+            position: '{{ game.fen_position }}',
+            onDragStart: onDragStart,
+            onDrop: onDrop,
+            onSnapEnd: onSnapEnd,
+            pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png'
+        };
+        
+        board = Chessboard('board', config);
+        
+        // Initialize quantum pieces display
+        updateQuantumPiecesDisplay();
+        
+        // Flip button
+        $('#flipBoard').on('click', function() {
+            board.flip();
+        });
+        
+        // Reset button
+        $('#resetGame').on('click', function() {
+            window.location.href = '{% url "quantum_chess:new_game" %}';
+        });
+        
+        // Quantum mode toggle
+        $('#quantumToggle').on('click', function() {
+            quantumMode = !quantumMode;
+            $(this).toggleClass('active', quantumMode);
+            
+            // Show/hide quantum controls
+            if (quantumMode) {
+                $('#quantumControls').show();
+                quantumSplitState.active = true;
+                $('#quantumControls .card-body').html(
+                    '<p class="text-info">Quantum Mode Active</p>' +
+                    '<p class="small text-muted">Click a piece to start quantum split</p>' +
+                    '<button class="btn btn-sm btn-outline-info w-100" id="cancelQuantum">Cancel</button>'
+                );
+            } else {
+                resetQuantumSplitState();
+            }
+            
+            // Send quantum mode to server
+            $.ajax({
+                url: '{% url "quantum_chess:toggle_quantum_mode" %}',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({
+                    game_id: gameId,
+                    quantum_mode: quantumMode
+                }),
+                headers: {
+                    'X-CSRFToken': '{{ csrf_token }}'
+                },
+                success: function(response) {
+                    console.log('Quantum mode toggled:', response);
+                },
+                error: function(error) {
+                    console.error('Error toggling quantum mode:', error);
+                }
+            });
+        });
+        
+        // Cancel quantum split
+        $(document).on('click', '#cancelQuantum', function() {
+            resetQuantumSplitState();
+        });
+        
+        // Keyboard handler for quantum mode
+        $(document).on('keydown', function(e) {
+            if (e.key === 'Shift') {
+                $('#quantumToggle').trigger('click');
+            }
+        });
+        
+        // Board click handler for quantum split
+        $('#board').on('click', '.square-55d, .square-55l', function() {
+            if (quantumMode && quantumSplitState.active) {
+                var square = $(this).data('square');
+                if (square) {
+                    handleQuantumSplitDrop(square, square);
+                }
+            }
+        });
+        
+        updateStatus();
+    });
+</script>
+{% endblock %}

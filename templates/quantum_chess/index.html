@@ -1,0 +1,75 @@
+{% extends 'quantum_chess/base.html' %}
+
+{% block title %}Quantum Chess - Home{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-lg-8 text-center">
+        <h1 class="display-4 mb-4">♔ Quantum Chess ♕</h1>
+        
+        <p class="lead mb-4">
+            Experience chess with a quantum twist! Pieces can exist in superposition,
+            and you can entangle pieces to create quantum relationships.
+        </p>
+        
+        <div class="card mb-4">
+            <div class="card-body">
+                <h3 class="card-title">How to Play</h3>
+                <div class="text-start">
+                    <h5>Rules</h5>
+                    <ul class="text-start">
+                        <li>The board is a regular 8x8 chessboard with 16 pieces each side</li>
+                        <li>Press <strong>Shift</strong> to toggle quantum mode</li>
+                        <li>In quantum mode, you can split a piece into two positions</li>
+                        <li>When a piece moves through a blocked square, pieces become entangled</li>
+                        <li>Measuring (capturing or being captured) collapses the quantum state</li>
+                    </ul>
+                    
+                    <h5>Quantum Moves</h5>
+                    <ul>
+                        <li><strong>Split:</strong> Move a piece to two different squares simultaneously</li>
+                        <li><strong>Entangle:</strong> Two pieces become quantumly linked</li>
+                        <li><strong>Measure:</strong> Capturing a piece reveals its actual position</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+        
+        <div class="d-grid gap-3 d-md-flex justify-content-md-center">
+            <a href="{% url 'quantum_chess:new_game' %}" class="btn btn-quantum btn-lg">
+                Start New Game
+            </a>
+            <a href="{% url 'quantum_chess:game_list' %}" class="btn btn-outline-light btn-lg">
+                View Games
+            </a>
+        </div>
+        
+        <div class="row mt-5">
+            <div class="col-md-4">
+                <div class="card h-100">
+                    <div class="card-body">
+                        <h5 class="card-title">🔮 Superposition</h5>
+                        <p class="card-text">Pieces can exist in multiple positions at once, creating uncertainty in the game.</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card h-100">
+                    <div class="card-body">
+                        <h5 class="card-title">🧩 Entanglement</h5>
+                        <p class="card-text">Link two pieces together so that measuring one affects the other.</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card h-100">
+                    <div class="card-body">
+                        <h5 class="card-title">⚛️ Quantum Computing</h5>
+                        <p class="card-text">Powered by Qiskit for authentic quantum simulation.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
