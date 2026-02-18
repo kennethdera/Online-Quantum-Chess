@@ -317,7 +317,10 @@
         };
         $('#quantumControls').hide();
         clearHighlights();
+        // Re-enable dragging
+        board.draggable = true;
     }
+
     
     function highlightSquare(square, type) {
         var $square = $('#board .square-' + square);
@@ -394,7 +397,8 @@
     
     function loadGameState() {
         $.ajax({
-            url: '{% url "quantum_chess:get_game_state" game.id %}',
+            url: '{% url "quantum_chess:game_state" game.id %}',
+
             method: 'GET',
             success: function(response) {
                 if (response.fen) {
@@ -444,6 +448,9 @@
             quantumMode = !quantumMode;
             $(this).toggleClass('active', quantumMode);
             
+            // Enable/disable dragging based on quantum mode
+            board.draggable = !quantumMode;
+            
             // Show/hide quantum controls
             if (quantumMode) {
                 $('#quantumControls').show();
@@ -456,6 +463,7 @@
             } else {
                 resetQuantumSplitState();
             }
+
             
             // Send quantum mode to server
             $.ajax({
@@ -481,7 +489,10 @@
         // Cancel quantum split
         $(document).on('click', '#cancelQuantum', function() {
             resetQuantumSplitState();
+            // Re-enable dragging when canceling quantum mode
+            board.draggable = true;
         });
+
         
         // Keyboard handler for quantum mode
         $(document).on('keydown', function(e) {
@@ -490,15 +501,58 @@
             }
         });
         
-        // Board click handler for quantum split
-        $('#board').on('click', '.square-55d, .square-55l', function() {
-            if (quantumMode && quantumSplitState.active) {
-                var square = $(this).data('square');
-                if (square) {
-                    handleQuantumSplitDrop(square, square);
-                }
+        // Global board click handler for quantum split - captures all clicks on the board
+        $('#board').on('click', function(e) {
+            if (!quantumMode || !quantumSplitState.active) {
+                return; // Let normal clicks pass through
             }
+            
+            // Prevent chessboard.js from handling this
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            
+            // Calculate which square was clicked based on position
+            var $board = $(this);
+            var offset = $board.offset();
+            var x = e.pageX - offset.left;
+            var y = e.pageY - offset.top;
+            
+            var boardWidth = $board.width();
+            var squareSize = boardWidth / 8;
+            
+            var file = Math.floor(x / squareSize);
+            var rank = 7 - Math.floor(y / squareSize); // Rank 0 is at the bottom
+            
+            if (file >= 0 && file < 8 && rank >= 0 && rank < 8) {
+                var files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+                var square = files[file] + (rank + 1);
+                
+                console.log('Quantum split click at:', x, y, 'Square:', square, 'State:', JSON.stringify(quantumSplitState));
+                
+                // Determine source and target based on current state
+                var source, target;
+                if (!quantumSplitState.fromSquare) {
+                    // First click - selecting the piece to split
+                    source = square;
+                    target = square;
+                } else {
+                    // Second or third click - selecting target squares
+                    source = quantumSplitState.fromSquare;
+                    target = square;
+                }
+                handleQuantumSplitDrop(source, target);
+            }
+            
+            return false;
         });
+
+
+
+
+
+
+
         
         updateStatus();
     });
