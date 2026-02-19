@@ -28,9 +28,16 @@ def game(request, game_id):
     Game view - displays the chess board for a specific game.
     """
     game_obj = get_object_or_404(Game, id=game_id)
+    
+    # Update status from 'waiting' to 'active' when player accesses the game
+    if game_obj.status == 'waiting':
+        game_obj.status = 'active'
+        game_obj.save()
+    
     return render(request, 'quantum_chess/game.html', {
         'game': game_obj,
     })
+
 
 
 def new_game(request):
@@ -80,6 +87,13 @@ def make_move(request):
         # Create chess board from FEN
         board = chess.Board(fen=game_obj.fen_position)
         
+        # Debug logging
+        print(f"DEBUG make_move: game_id={game_id}, from={from_square}({from_sq}), to={to_square}({to_sq})")
+        print(f"DEBUG board FEN: {board.fen()}")
+        print(f"DEBUG board turn: {'white' if board.turn == chess.WHITE else 'black'}")
+        print(f"DEBUG game current_turn: {game_obj.current_turn}")
+        print(f"DEBUG legal moves count: {len(list(board.legal_moves))}")
+        
         # Create move
         move = chess.Move(from_sq, to_sq)
         if promotion:
@@ -87,20 +101,131 @@ def make_move(request):
         
         # Check if move is legal
         if move not in board.legal_moves:
+            print(f"DEBUG: Move {move} not in legal moves. Legal moves: {list(board.legal_moves)[:10]}...")
             return JsonResponse({
                 'success': False,
-                'error': 'Illegal move'
+                'error': 'Illegal move',
+                'debug': {
+                    'fen': board.fen(),
+                    'turn': 'white' if board.turn == chess.WHITE else 'black',
+                    'requested_move': f"{from_square}->{to_square}",
+                }
             }, status=400)
+
+        
+        # Get quantum pieces data
+        quantum_pieces_data = game_obj.quantum_pieces if game_obj.quantum_pieces else []
+        from_square_name = chess.square_name(from_sq)
+        to_square_name = chess.square_name(to_sq)
+        
+        # Get the piece being moved
+        piece = board.piece_at(from_sq)
+        moved_piece_symbol = piece.symbol() if piece else None
+
+        
+        # Check if we're capturing a quantum piece at the destination
+        # If so, we need to collapse that quantum piece from ALL its positions
+        captured_quantum_index = None
+        captured_quantum_positions = []
+        
+        for i, qp in enumerate(quantum_pieces_data):
+            for state_id, state_data in qp.get('qnum', {}).items():
+                if state_data[0] == to_square_name:
+                    # We're capturing a quantum piece!
+                    captured_quantum_index = i
+                    # Get all positions of this quantum piece
+                    for all_state_id, all_state_data in qp.get('qnum', {}).items():
+                        captured_quantum_positions.append(all_state_data[0])
+                    break
+            if captured_quantum_index is not None:
+                break
+        
+        # Check if the piece being moved is in quantum state (moving from superposition)
+        moving_quantum_index = None
+        moving_quantum_other_positions = []
+        
+        for i, qp in enumerate(quantum_pieces_data):
+            for state_id, state_data in qp.get('qnum', {}).items():
+                if state_data[0] == from_square_name:
+                    moving_quantum_index = i
+                    # Find all other positions for this quantum piece
+                    for other_state_id, other_state_data in qp.get('qnum', {}).items():
+                        if other_state_id != state_id:
+                            moving_quantum_other_positions.append(other_state_data[0])
+                    break
+            if moving_quantum_index is not None:
+                break
         
         # Make the move
         san = board.san(move)
         board.push(move)
         
+        # If we captured a quantum piece, remove it from ALL its superposition positions
+        if captured_quantum_index is not None and captured_quantum_positions:
+            print(f"DEBUG: Capturing quantum piece at {to_square_name}")
+            print(f"DEBUG: Removing quantum piece from all positions: {captured_quantum_positions}")
+            for pos in captured_quantum_positions:
+                pos_sq = chess.parse_square(pos)
+                # Remove the quantum piece from this position
+                board.remove_piece_at(pos_sq)
+                print(f"DEBUG: Removed piece from {pos}")
+            
+            # Remove the captured quantum piece from the quantum pieces list
+            quantum_pieces_data.pop(captured_quantum_index)
+            print(f"DEBUG: Removed quantum piece from data list")
+            
+            # Now place the capturing piece at the destination
+            if moved_piece_symbol:
+                board.set_piece_at(to_sq, chess.Piece.from_symbol(moved_piece_symbol))
+                print(f"DEBUG: Placed capturing piece {moved_piece_symbol} at {to_square_name}")
+        
+        # If this was a quantum piece being moved, collapse its other superpositions
+        if moving_quantum_index is not None and moving_quantum_other_positions:
+            print(f"DEBUG: Collapsing moved quantum piece from {from_square_name} to {to_square_name}")
+            print(f"DEBUG: Removing piece from other positions: {moving_quantum_other_positions}")
+            for other_pos in moving_quantum_other_positions:
+                other_sq = chess.parse_square(other_pos)
+                # Remove the piece from the other superposition position
+                board.remove_piece_at(other_sq)
+            
+            # Update the quantum piece state - move it to the new position
+            # Adjust index if we removed a piece before it
+            adjusted_index = moving_quantum_index
+            if captured_quantum_index is not None and captured_quantum_index < moving_quantum_index:
+                adjusted_index = moving_quantum_index - 1
+            
+            if adjusted_index < len(quantum_pieces_data):
+                quantum_pieces_data[adjusted_index]['qnum'] = {
+                    '0': [to_square_name, 1.0]  # Collapsed to 100% probability at new position
+                }
+                
+                # Remove entanglement since piece is now measured/collapsed
+                quantum_pieces_data[adjusted_index]['entangled'] = []
+        
+        # Update game status based on board state
+        if board.is_checkmate():
+            game_obj.status = 'checkmate'
+        elif board.is_stalemate():
+            game_obj.status = 'stalemate'
+        elif board.is_insufficient_material():
+            game_obj.status = 'draw'
+        elif board.is_fivefold_repetition():
+            game_obj.status = 'draw'
+        elif board.is_seventyfive_moves():
+            game_obj.status = 'draw'
+        elif board.is_variant_draw():
+            game_obj.status = 'draw'
+        else:
+            game_obj.status = 'active'
+        
         # Update game
         game_obj.fen_position = board.fen()
         game_obj.current_turn = not game_obj.current_turn
         game_obj.quantum_mode = quantum_mode
+        game_obj.quantum_pieces = quantum_pieces_data
         game_obj.save()
+
+
         
         # Record move
         move_count = Move.objects.filter(game=game_obj).count()
@@ -177,7 +302,40 @@ def quantum_split(request):
                 'error': 'No piece at the source square'
             }, status=400)
         
+        # Validate that target squares are legal moves for this piece
+        # Create a temporary board to check legal moves
+        temp_board = chess.Board(fen=game_obj.fen_position)
+        legal_moves = [move for move in temp_board.legal_moves if move.from_square == from_sq]
+        legal_targets = {move.to_square for move in legal_moves}
+        
+        if to_sq1 not in legal_targets:
+            return JsonResponse({
+                'success': False,
+                'error': f'Illegal split: {to_square1} is not a valid move for this piece'
+            }, status=400)
+        
+        if to_sq2 not in legal_targets:
+            return JsonResponse({
+                'success': False,
+                'error': f'Illegal split: {to_square2} is not a valid move for this piece'
+            }, status=400)
+        
+        # Rule: It is illegal to capture on split - target squares must be empty
+        if board.piece_at(to_sq1):
+            return JsonResponse({
+                'success': False,
+                'error': f'Illegal split: {to_square1} is occupied. Capturing is not allowed during quantum split'
+            }, status=400)
+        
+        if board.piece_at(to_sq2):
+            return JsonResponse({
+                'success': False,
+                'error': f'Illegal split: {to_square2} is occupied. Capturing is not allowed during quantum split'
+            }, status=400)
+        
         # Check if piece already exists in quantum state
+
+
         existing_qp = None
         existing_state = None
         for qp in quantum_game.quantum_pieces:
@@ -210,18 +368,36 @@ def quantum_split(request):
         game_obj.quantum_mode = True
         
         # Update the board FEN to remove the piece from original position
-        # and add it to the quantum superposition positions
         board.remove_piece_at(from_sq)
+        
+        # Add the piece to BOTH target positions so either can be moved
+        # The piece is in quantum superposition at both locations
+        board.set_piece_at(to_sq1, piece)
+        board.set_piece_at(to_sq2, piece)
+        
+        # Switch turn in the FEN as well so chess.js knows whose turn it is
+        board.turn = not board.turn
         game_obj.fen_position = board.fen()
+
+
         
         # Switch turn after quantum split
         game_obj.current_turn = not game_obj.current_turn
         
+        # Update game status
+        if board.is_checkmate():
+            game_obj.status = 'checkmate'
+        elif board.is_stalemate():
+            game_obj.status = 'stalemate'
+        elif board.is_insufficient_material():
+            game_obj.status = 'draw'
+        else:
+            game_obj.status = 'active'
+        
         game_obj.save()
 
-
-        
         # Record the split move
+
         move_count = Move.objects.filter(game=game_obj).count()
         Move.objects.create(
             game=game_obj,
@@ -424,7 +600,9 @@ def get_game_state(request, game_id):
         'quantum_mode': game_obj.quantum_mode,
         'status': game_obj.status,
         'moves': move_list,
+        'quantum_pieces': game_obj.quantum_pieces if game_obj.quantum_pieces else [],
     })
+
 
 
 def game_list(request):

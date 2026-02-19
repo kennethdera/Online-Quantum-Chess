@@ -109,7 +109,8 @@
                     <div class="game-info mb-3">
                         <p><strong>Game ID:</strong> {{ game.id }}</p>
                         <p><strong>Status:</strong> {{ game.get_status_display }}</p>
-                        <p><strong>FEN:</strong> <small>{{ game.fen_position }}</small></p>
+                        <p><strong>FEN:</strong> <small id="gameFen">{{ game.fen_position }}</small></p>
+
                     </div>
                     
                     <h6>Move History</h6>
@@ -203,12 +204,20 @@
             return 'snapback';
         }
         
+        // Check if this is a promotion move (pawn reaching last rank)
+        var piece = game.get(source);
+        var isPromotion = piece && piece.type === 'p' && (target[1] === '8' || target[1] === '1');
+        
         // Normal move
-        var move = game.move({
+        var moveConfig = {
             from: source,
-            to: target,
-            promotion: 'q'
-        });
+            to: target
+        };
+        if (isPromotion) {
+            moveConfig.promotion = 'q';
+        }
+        
+        var move = game.move(moveConfig);
 
         // Illegal move
         if (move === null) return 'snapback';
@@ -217,17 +226,22 @@
         updateBoard();
         
         // Send move to server
+        var moveData = {
+            game_id: gameId,
+            from_square: source,
+            to_square: target,
+            quantum_mode: quantumMode
+        };
+        if (isPromotion) {
+            moveData.promotion = 'q';
+        }
+        
         $.ajax({
             url: '{% url "quantum_chess:make_move" %}',
             method: 'POST',
             contentType: 'application/json',
-            data: JSON.stringify({
-                game_id: gameId,
-                from_square: source,
-                to_square: target,
-                promotion: 'q',
-                quantum_mode: quantumMode
-            }),
+            data: JSON.stringify(moveData),
+
             headers: {
                 'X-CSRFToken': '{{ csrf_token }}'
             },
@@ -236,11 +250,27 @@
                 if (response.fen) {
                     game.load(response.fen);
                     board.position(response.fen);
+                    // Update FEN display
+                    $('#gameFen').text(response.fen);
                 }
+                // Update move history after successful move
+                loadGameState();
             },
+
+
             error: function(error) {
                 console.error('Error saving move:', error);
+                console.error('Error response:', error.responseText);
+                console.error('Error status:', error.status);
+                // Log the move that failed
+                console.log('Failed move attempt:', {
+                    from: source,
+                    to: target,
+                    gameTurn: game.turn(),
+                    fen: game.fen()
+                });
             }
+
         });
     }
     
@@ -290,17 +320,49 @@
             },
             success: function(response) {
                 console.log('Quantum split performed:', response);
+                console.log('Server turn:', response.turn, 'Current game turn:', game.turn());
+                
                 if (response.fen) {
+                    // Load the new position - this updates game.turn() and board
                     game.load(response.fen);
-                    board.position(response.fen);
+                    // Don't call board.position() separately - it causes flicker
+                    // The board will update via chessboard.js internal state
+                    console.log('After loading FEN, game turn is now:', game.turn());
+                    // Update FEN display
+                    $('#gameFen').text(response.fen);
                 }
+
                 if (response.quantum_pieces) {
                     quantumPieces = response.quantum_pieces;
                     updateQuantumPiecesDisplay();
+                    // Delay rendering to ensure board is ready
+                    setTimeout(renderQuantumPiecesOnBoard, 100);
                 }
+                // Update turn display from server
+                if (response.turn) {
+                    var turnText = response.turn === 'white' ? "White's Turn" : "Black's Turn";
+                    $('.game-status').text(turnText);
+                    console.log('Updated status to:', turnText);
+                }
+                
+                // Turn off quantum mode after successful split
+                quantumMode = false;
+                $('#quantumToggle').removeClass('active');
+                board.draggable = true; // Re-enable dragging
+                
+                // Reset quantum state and clear highlights
                 resetQuantumSplitState();
+                
+                // Update move history after quantum split
                 loadGameState();
+                // Don't call updateStatus() here - it would overwrite our turn display
             },
+
+
+
+
+
+
             error: function(error) {
                 console.error('Error performing quantum split:', error);
                 alert('Quantum split failed: ' + (error.responseJSON?.error || 'Unknown error'));
@@ -329,9 +391,12 @@
     }
     
     function clearHighlights() {
+        // Clear all square backgrounds - highlights are set via inline CSS
+        $('#board [class*="square-"]').css('background', '');
+        // Also remove any highlight classes if they exist
         $('#board .square-55d, #board .square-55l').css('background', '');
-        board.position(game.fen());
     }
+
     
     function updateBoard() {
         board.position(game.fen());
@@ -395,6 +460,101 @@
         $container.html(html);
     }
     
+    function updateMoveHistory(moves) {
+        var $container = $('#moveHistory');
+        if (!moves || moves.length === 0) {
+            $container.html('<p class="text-muted">No moves yet</p>');
+            return;
+        }
+        
+        var html = '<ul class="list-unstyled mb-0">';
+        moves.forEach(function(move) {
+            var moveText = move.number + '. ' + (move.is_white ? '' : '...') + move.san;
+            var badgeClass = move.type === 'split' ? 'badge-info' : (move.type === 'quantum' ? 'badge-warning' : 'badge-secondary');
+            html += '<li class="mb-1"><span class="badge ' + badgeClass + ' mr-1">' + move.type + '</span> ' + moveText + '</li>';
+        });
+        html += '</ul>';
+        $container.html(html);
+    }
+
+    
+    // Convert piece symbol to chessboard.js format (e.g., 'P' -> 'wP', 'p' -> 'bP')
+    function getPieceImageName(piece) {
+        if (!piece) return null;
+        var pieceUpper = piece.toUpperCase();
+        var isWhite = piece === pieceUpper; // Uppercase = white
+        var color = isWhite ? 'w' : 'b';
+        return color + pieceUpper;
+    }
+    
+    // Render quantum pieces on the board as ghost pieces
+    function renderQuantumPiecesOnBoard() {
+        // Clear any existing quantum piece indicators
+        $('#board .quantum-ghost').remove();
+        
+        if (!quantumPieces || quantumPieces.length === 0) return;
+        
+        var pieceTheme = 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png';
+        
+        // Debug: log board structure
+        console.log('Board element:', $('#board')[0]);
+        console.log('Board children count:', $('#board').children().length);
+        
+        quantumPieces.forEach(function(qp) {
+            for (var state in qp.qnum) {
+                var pos = qp.qnum[state][0];
+                var prob = qp.qnum[state][1];
+                var piece = qp.piece;
+                
+                // Convert piece to chessboard.js format (e.g., 'P' -> 'wP', 'p' -> 'bP')
+                var pieceImage = getPieceImageName(piece);
+                if (!pieceImage) {
+                    console.log('Invalid piece symbol:', piece);
+                    continue;
+                }
+                
+                // chessboard.js creates elements with class pattern like "square-a1"
+                // Try to find by looking for elements with the square class
+                var $square = $('#board').find('[class*="square-' + pos + '"]');
+                
+                if ($square.length === 0) {
+                    console.log('Could not find square for quantum piece:', pos);
+                    // Log all available square classes for debugging
+                    var allSquares = $('#board [class*="square-"]').map(function() { 
+                        return $(this).attr('class'); 
+                    }).get();
+                    console.log('Available square classes:', allSquares.slice(0, 10), '...');
+                    continue;
+                }
+                
+                console.log('Rendering quantum piece at:', pos, 'piece:', piece, 'image:', pieceImage, 'prob:', prob);
+                // Create ghost piece image
+                var $ghost = $('<img>')
+                    .addClass('quantum-ghost')
+                    .attr('src', pieceTheme.replace('{piece}', pieceImage))
+                    .css({
+                        'position': 'absolute',
+                        'width': '50%',
+                        'height': '50%',
+                        'opacity': prob,
+                        'pointer-events': 'none',
+                        'z-index': 100,
+                        'top': '25%',
+                        'left': '25%'
+                    });
+                
+                // Position the ghost piece
+                $square.css('position', 'relative');
+                $square.append($ghost);
+            }
+        });
+    }
+
+
+
+
+
+    
     function loadGameState() {
         $.ajax({
             url: '{% url "quantum_chess:game_state" game.id %}',
@@ -402,20 +562,40 @@
             method: 'GET',
             success: function(response) {
                 if (response.fen) {
-                    game.load(response.fen);
-                    board.position(response.fen);
+                    // Only update if FEN is different to avoid flicker
+                    var currentFen = game.fen();
+                    if (response.fen !== currentFen) {
+                        game.load(response.fen);
+                        board.position(response.fen);
+                    }
+                    // Update FEN display
+                    $('#gameFen').text(response.fen);
                 }
+
                 if (response.quantum_pieces) {
                     quantumPieces = response.quantum_pieces;
                     updateQuantumPiecesDisplay();
+                    renderQuantumPiecesOnBoard();
                 }
-                updateStatus();
+                // Update turn from server
+                if (response.turn) {
+                    var turnText = response.turn === 'white' ? "White's Turn" : "Black's Turn";
+                    $('.game-status').text(turnText);
+                }
+                // Update move history
+                if (response.moves) {
+                    updateMoveHistory(response.moves);
+                }
+                // Don't call updateStatus() here as it may overwrite server turn info
+
             },
             error: function(error) {
                 console.error('Error loading game state:', error);
             }
         });
     }
+
+
     
     // Initialize
     $(document).ready(function() {
