@@ -184,14 +184,16 @@ class QuantumPiece:
         Remove entanglement when a piece is measured.
         
         Args:
-            add: State identifier to remove
+            add: State identifier prefix to remove
             obj: The piece this one was entangled with
         """
         probs = 0
         all_states = list(self.qnum.keys())
         for i in all_states:
-            # Use exact state matching instead of prefix matching
-            if i == add:
+            # Use prefix matching to remove all states that start with 'add'
+            # This matches the reference implementation in Code/Quant.py
+            if i.startswith(add):
+                print('delete', i)
                 del self.qnum[i]
             else:
                 probs += self.qnum[i][1]
@@ -200,6 +202,12 @@ class QuantumPiece:
         if probs > 0:
             for i in self.qnum:
                 self.qnum[i][1] /= probs
+        
+        # Note: Nested entanglement handling would go here
+        # The commented code in the reference implementation shows:
+        # for i in range(len(self.ent)):
+        #     if self.ent[i][0] == obj:
+        #         self.ent.remove(self.ent[i])
     
     def measure(self) -> Tuple[str, float]:
         """
@@ -256,16 +264,22 @@ class QuantumPiece:
         
         final_state = '0' + final_state
         
-        # Detangle entangled pieces - use exact state matching
+        # Detangle entangled pieces - use prefix matching to match the reference implementation
+        # This ensures all entangled pieces are properly collapsed
+        print("Piece ent list:", self.ent)
         for i in range(len(self.ent)):
-            if final_state == self.ent[i][2]:
+            if final_state.startswith(self.ent[i][2]):
+                print("Entangled guy's states:", self.ent[i][0].qnum)
                 self.ent[i][0].detangle(self.ent[i][1], self)
+                print("Entangled guy's states after detangle:", self.ent[i][0].qnum)
         
         # Set final position
         final_pos = self.qnum[final_state][0]
         self.qnum.clear()
         self.ent.clear()
         self.qnum['0'] = [final_pos, 1]
+        
+        print("States after measuring:", self.qnum)
         
         return final_pos, 1.0
     
