@@ -190,12 +190,13 @@ class QuantumPiece:
         probs = 0
         all_states = list(self.qnum.keys())
         for i in all_states:
-            if i.startswith(add):
+            # Use exact state matching instead of prefix matching
+            if i == add:
                 del self.qnum[i]
             else:
                 probs += self.qnum[i][1]
         
-        # Normalize probabilities
+        # Normalize probabilities - add division by zero protection
         if probs > 0:
             for i in self.qnum:
                 self.qnum[i][1] /= probs
@@ -255,9 +256,9 @@ class QuantumPiece:
         
         final_state = '0' + final_state
         
-        # Detangle entangled pieces
+        # Detangle entangled pieces - use exact state matching
         for i in range(len(self.ent)):
-            if final_state.startswith(self.ent[i][2]):
+            if final_state == self.ent[i][2]:
                 self.ent[i][0].detangle(self.ent[i][1], self)
         
         # Set final position

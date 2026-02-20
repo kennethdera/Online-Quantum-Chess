@@ -160,22 +160,35 @@ def make_move(request):
         san = board.san(move)
         board.push(move)
         
-        # If we captured a quantum piece, remove it from ALL its superposition positions
+        # If we captured a quantum piece, the capture reveals its actual position
+        # So the piece collapses to 100% at the captured position, other positions are removed
         if captured_quantum_index is not None and captured_quantum_positions:
             print(f"DEBUG: Capturing quantum piece at {to_square_name}")
-            print(f"DEBUG: Removing quantum piece from all positions: {captured_quantum_positions}")
-            for pos in captured_quantum_positions:
-                pos_sq = chess.parse_square(pos)
-                # Remove the quantum piece from this position
-                board.remove_piece_at(pos_sq)
-                print(f"DEBUG: Removed piece from {pos}")
+            print(f"DEBUG: Quantum piece was at positions: {captured_quantum_positions}")
             
-            # Remove the captured quantum piece from the quantum pieces list
+            # Remove piece from the board at capture position
+            board.remove_piece_at(to_sq)
+            print(f"DEBUG: Removed piece from capture position {to_square_name}")
+            
+            # Capturing a quantum piece "measures" it - we now know it was at the captured position
+            # So collapse to 100% at the captured position, remove all other positions
+            # The piece becomes a classical piece at the capture destination
+            
+            # Get the piece type from quantum piece data
+            captured_piece_type = quantum_pieces_data[captured_quantum_index].get('piece')
+            
+            # Remove the quantum piece from quantum_pieces_data (it becomes classical)
             quantum_pieces_data.pop(captured_quantum_index)
-            print(f"DEBUG: Removed quantum piece from data list")
+            print(f"DEBUG: Removed quantum piece from data list (collapsed to captured position)")
             
-            # Now place the capturing piece at the destination
+            # Place the captured piece as a classical piece at the destination
+            if captured_piece_type:
+                board.set_piece_at(to_sq, chess.Piece.from_symbol(captured_piece_type))
+                print(f"DEBUG: Placed captured piece {captured_piece_type} at {to_square_name} as classical piece")
+            
+            # Also place the capturing piece if there is one
             if moved_piece_symbol:
+                # The capturing piece goes to the captured position
                 board.set_piece_at(to_sq, chess.Piece.from_symbol(moved_piece_symbol))
                 print(f"DEBUG: Placed capturing piece {moved_piece_symbol} at {to_square_name}")
         
