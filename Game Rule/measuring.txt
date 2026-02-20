@@ -1,0 +1,97 @@
+🎯 MEASUREMENT LOGIC FLOW
+
+Measurement is triggered when:
+
+A piece attempts to capture
+
+A piece is being captured
+
+A rule forces resolution (e.g., illegal overlap)
+
+🧭 STEP 0 — Trigger
+
+Event occurs:
+
+Is a superposed or entangled piece involved?
+    ├─ No → Resolve move normally (classical chess)
+    └─ Yes → Proceed to Measurement
+🧩 STEP 1 — Identify Quantum State Type
+Is the piece:
+    A) Superposed only?
+    B) Entangled?
+    C) Both superposed and entangled?
+🔹 CASE A — Superposition Only
+1. Retrieve list of possible squares
+2. Retrieve probability for each square
+3. Randomly select one square according to probabilities
+4. Collapse piece to that square
+5. Remove other instances
+6. Continue move resolution
+
+Done.
+
+🔗 CASE B — Entangled (No Additional Superposition)
+
+This means the piece is part of a joint state.
+
+1. Retrieve full joint probability table
+   Example:
+       (A1, B3) → 0.4
+       (A2, B4) → 0.6
+
+2. Randomly select one joint outcome
+3. Collapse ALL involved pieces to that joint state
+4. Remove all other possibilities
+5. Continue move resolution
+
+Important:
+You collapse the entire entangled system, not just one piece.
+
+🔄 CASE C — Superposed + Entangled
+
+This is the most general case.
+
+1. Identify full entanglement group
+2. Build complete joint state table
+   (including all superposed positions)
+3. Normalize probabilities (if needed)
+4. Randomly select one joint outcome
+5. Collapse ALL pieces in the group
+6. Remove all other branches
+7. Continue move resolution
+
+This ensures:
+✔ No partial collapse
+✔ No inconsistent states
+✔ Proper correlation preserved
+
+⚔ SPECIAL: Measurement During Capture
+
+If capturing piece is superposed:
+
+1. Measure attacking piece first
+2. Determine its real square
+3. Check if capture is still valid
+       ├─ If yes → Measure defender
+       └─ If no → Move fails (turn ends)
+
+If defending piece is superposed:
+
+1. Measure defender
+2. If defender exists on target square → capture succeeds
+3. Otherwise → capture fails
+
+If both are entangled in the same group:
+
+Collapse entire entangled system first
+Then resolve capture
+♟ SPECIAL: Measuring a King
+
+If measurement affects a king:
+
+After collapse:
+    Is king in check?
+        ├─ Yes → illegal state? (depends on your rule)
+        └─ No → continue
+
+If all possible king states were in check → checkmate.
