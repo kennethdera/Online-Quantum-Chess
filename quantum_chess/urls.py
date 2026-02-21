@@ -18,5 +18,4 @@ urlpatterns = [
 
     path('quantum/measure/', views.measure_piece, name='measure_piece'),
     path('games/', views.game_list, name='game_list'),
-    path('undo/', views.undo_move, name='undo_move'),
 ]

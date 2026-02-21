@@ -1,63 +1,64 @@
-# TODO: Fix Quantum
-The Django project's Project
+# TODO: Fix Quantum Rules Bugs in Django Project
 
-## Summary Rules Bugs in Django quantum chess implementation has bugs in the quantum rules compared to the reference Code/Quant.py. The main issues are in the `detangle()` and `measure()` methods.
+## Summary
+The Django project's quantum chess implementation has bugs in the quantum rules compared to the reference Code/Quant.py and the Game Rule/Move Declaration Rule.txt.
 
-## Bugs Identified
+## Bugs Identified and Fixed
 
 ### 1. detangle() method - Wrong matching logic
 - **File:** `quantum_chess/quantum/quant.py`
-- **Issue:** Uses exact state matching (`if i == add:`) instead of prefix matching
-- **Reference (Code/Quant.py):** Uses `if i.startswith(add):`
-- **Impact:** When measuring/entanglement, quantum pieces are not properly detangled because states with longer identifiers are not removed
+- **Issue:** Used exact state matching instead of prefix matching
+- **Fix:** Changed to prefix matching `if i.startswith(add):`
 
 ### 2. measure() method - Wrong entanglement matching
 - **File:** `quantum_chess/quantum/quant.py`
-- **Issue:** Uses exact state matching (`if final_state == self.ent[i][2]`) instead of prefix matching
-- **Reference (Code/Quant.py):** Uses `if final_state.startswith(self.ent[i][2]):`
-- **Impact:** Entangled pieces are not properly collapsed when measuring
+- **Issue:** Used exact state matching instead of prefix matching
+- **Fix:** Changed to prefix matching `if final_state.startswith(self.ent[i][2]):`
 
-### 3. Missing entangling updates in detangle
-- **File:** `quantum_chess/quantum/quant.py`
-- **Issue:** The detangle method doesn't update the entanglement list
-- **Reference (Code/Quant.py):** Has commented code for handling nested entanglement
-- **Impact:** After measurement, stale entanglement references remain
+### 3. quantum_split() - Too restrictive validation
+- **File:** `quantum_chess/views.py`
+- **Issue:** Required target squares to be in legal moves AND empty, even in quantum mode
+- **Fix:** In quantum mode, allows any two different empty squares
+
+## Game Rule Refinement - Move Declaration Rule Implemented
+
+Based on Game Rule/Move Declaration Rule.txt, the following refinements were implemented:
+
+### 1. Move Commitment Principle
+- Move type is now declared BEFORE any measurement occurs
+- `declared_move_type` is set at the start of make_move
+- This is locked - the move cannot change type after measurement
+
+### 2. Classical Move Declaration
+- Non-capturing moves cannot become captures after measurement
+- If target square ends up occupied after measurement, move fails
+
+### 3. Capture Move Declaration  
+- Capture moves stay as captures - cannot become non-captures
+- If defender collapses to different square, capture fails
+
+### 4. Failed Move Consequence
+- If declared move becomes invalid after measurement:
+  - Moving piece stays on original square
+  - Turn ends
+  - Collapsed board state remains
+
+### 5. No Retroactive Move Conversion
+- Cannot change from capture to non-capture
+- Cannot change from non-capture to capture
+- Cannot change target squares after measurement
 
 ## Tasks Completed
 
-- [x] 1. Fix `detangle()` method to use prefix matching (startswith)
-- [x] 2. Fix `measure()` method entanglement detection to use prefix matching
-- [x] 3. Test the quantum rules to ensure proper entanglement and measurement behavior
-- [x] 4. Create views_updated.py with complete measurement logic for all three cases
+- [x] Fix detangle() method to use prefix matching
+- [x] Fix measure() method entanglement detection
+- [x] Fix quantum_split validation
+- [x] Implement Move Declaration Rule:
+  - [x] Move type declared BEFORE measurement
+  - [x] Classical moves stay non-captures
+  - [x] Captures stay captures
+  - [x] Failed moves leave piece on original square
 
-## Changes Made
-
-### quantum_chess/quantum/quant.py
-
-1. **detangle() method:**
-   - Changed from exact match `if i == add:` to prefix match `if i.startswith(add):`
-   - Added print statements for debugging (matching reference implementation)
-
-2. **measure() method:**
-   - Changed from exact match `if final_state == self.ent[i][2]` to prefix match `if final_state.startswith(self.ent[i][2])`
-   - Added print statements for debugging entanglement states
-
-### quantum_chess/views_updated.py
-
-Created a new file with complete quantum measurement logic per Game Rule/measuring.txt:
-
-1. **make_move()**: Implements proper capture flow:
-   - STEP 0: Trigger check - Is superposed or entangled piece involved?
-   - STEP 1: Identify Quantum State Type - CASE A/B/C
-   - CASE A: Superposition only - measure() collapses single piece
-   - CASE B: Entangled only - measure() collapses entangled group
-   - CASE C: Superposed + Entangled - measure() collapses entire entangled system
-   - Special: Capture flow - 1) Measure attacker first, check if capture valid, 2) Measure defender
-
-2. **quantum_split()**: Performs quantum split (superposition) move
-3. **quantum_entangle()**: Performs quantum entanglement (CASE B)
-4. **measure_piece()**: Manual measurement endpoint for all cases
-
-## Usage
-
-The views_updated.py contains the corrected quantum rules implementation. To use it, replace views.py with views_updated.py or integrate the functions into views.py.
+## Files Modified
+- quantum_chess/quantum/quant.py - Fixed detangle() and measure() methods
+- quantum_chess/views.py - Implemented Move Declaration Rule and fixed quantum_split

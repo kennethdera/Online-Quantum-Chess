@@ -294,18 +294,21 @@ class QuantumPiece:
         # Normalize probabilities
         total = sum(probabilities)
         if total > 0:
-            probabilities = [p / total for p in probabilities]
+            normalized_probs = [p / total for p in probabilities]
+        else:
+            normalized_probs = probabilities
         
         # Choose based on probability
         rand = random.random()
         cumulative = 0
-        for i, prob in enumerate(probabilities):
+        for i, prob in enumerate(normalized_probs):
             cumulative += prob
             if rand <= cumulative:
-                return self.qnum[states[i]][0], self.qnum[states[i]][1]
+                # Return the NORMALIZED probability, not the original
+                return self.qnum[states[i]][0], normalized_probs[i]
         
-        # Fallback to first state
-        return self.qnum[states[0]][0], self.qnum[states[0]][1]
+        # Fallback to first state with normalized probability
+        return self.qnum[states[0]][0], normalized_probs[0] if normalized_probs else 1.0
 
     
     def to_dict(self) -> Dict:

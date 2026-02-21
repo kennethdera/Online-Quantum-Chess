@@ -1,0 +1,138 @@
+♟ Quantum Chess — Formal Move Declaration Rule
+1️⃣ Move Commitment Principle
+
+When a player declares a move, the move type is locked before any measurement occurs.
+
+A move must be declared as exactly one of the following:
+
+Classical Move
+
+Capture Move
+
+Split Move
+
+Quantum Capture (if capturing a superposed piece)
+
+The move type cannot change after measurement.
+
+2️⃣ Resolution Order
+
+All moves resolve in this strict order:
+
+1. Declare move (type + target square(s))
+2. Identify quantum involvement
+3. Trigger measurement if required
+4. Collapse affected quantum states
+5. Validate declared move against new classical board state
+6. Execute move if valid
+7. Otherwise, move fails
+
+No rollback is permitted after collapse.
+
+3️⃣ Classical Move Declaration
+
+If a player declares a non-capturing move:
+
+If the destination square is empty after any required measurement → move succeeds.
+
+If the destination square is occupied → move fails.
+
+The move cannot convert into a capture.
+
+4️⃣ Capture Move Declaration
+
+If a player declares a capture:
+
+Step A — Measurement Trigger
+
+If the target piece is:
+
+Superposed
+
+Entangled
+
+Or both
+
+Measurement occurs immediately.
+
+Step B — Collapse
+
+All involved entangled pieces collapse according to joint probabilities.
+
+Step C — Validation
+
+After collapse:
+
+If the target square contains an opponent piece → capture succeeds.
+
+If the target square is empty → capture fails.
+
+The capturing piece remains on its original square if the capture fails.
+
+5️⃣ Split Move Declaration
+
+When declaring a split:
+
+Two legal destination squares must be specified.
+
+Probabilities are assigned immediately.
+
+The piece enters superposition.
+
+Turn ends.
+
+If measurement is triggered during the split resolution, collapse occurs before finalizing board state.
+
+6️⃣ No Retroactive Move Conversion Rule
+
+A declared move:
+
+Cannot change from capture to non-capture.
+
+Cannot change from non-capture to capture.
+
+Cannot change target squares after measurement.
+
+Measurement determines board reality — it does not modify the declared intent.
+
+7️⃣ Irreversibility of Collapse
+
+Once measurement occurs:
+
+The board state updates permanently.
+
+All non-selected branches are removed.
+
+The previous state cannot be restored.
+
+There is no FEN rollback.
+
+8️⃣ Failed Move Consequence
+
+If a declared move becomes invalid after measurement:
+
+The moving piece remains on its original square.
+
+The turn ends.
+
+The collapsed board state remains in effect.
+
+9️⃣ Multi-Piece Entanglement Clause
+
+If a measured piece belongs to an entangled group:
+
+The entire entangled system collapses simultaneously.
+
+All pieces in the group update before move validation.
+
+No partial collapse is allowed.
+
+🔟 Check & Legality Clause
+
+After collapse and move resolution:
+
+Standard chess legality applies.
+
+A move that results in self-check is illegal.
+
+If collapse alone places a king in check, that is the new valid board state.
