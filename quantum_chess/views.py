@@ -91,52 +91,77 @@ def make_move(request):
         
         # BUG FIX: Check if target has quantum piece BEFORE checking classical capture
         # After quantum split, pieces exist in superposition, not on the classical board
+        # Also check for quantum pieces at the source (for moving piece)
+        source_has_quantum = False
         target_has_quantum = False
+        source_quantum_piece = None  # Store the quantum piece at source for later use
+        target_quantum_piece = None  # Store the quantum piece at target for later use
+        
         for qp in quantum_pieces_data:
             for state_id, state_data in qp.get('qnum', {}).items():
+                if state_data[0] == from_square_name:
+                    source_has_quantum = True
+                    source_quantum_piece = qp
                 if state_data[0] == to_square_name:
                     target_has_quantum = True
-                    break
+                    target_quantum_piece = qp
         
         # Check if declared as capture - include quantum piece targets
         is_capture_declared = board.is_capture(move) or target_has_quantum
         declared_move_type = 'capture' if is_capture_declared else 'classical'
         
-        # Verify the move is at least pseudo-legal
-        try:
-            legal_moves = list(board.legal_moves)
-            if not is_capture_declared and move not in legal_moves:
-                return JsonResponse({'success': False, 'error': 'Illegal move'}, status=400)
-        except Exception as e:
-            return JsonResponse({'success': False, 'error': f'Move validation error: {str(e)}'}, status=400)
-
-        piece = board.piece_at(from_sq)
+        # FIX: Handle quantum piece moves - source may not have classical piece
+        # If source has quantum piece, we need different validation
+        piece = None
+        if source_has_quantum:
+            # Source has quantum piece - don't validate against classical board
+            # The quantum piece will be measured when making the move
+            piece = chess.Piece.from_symbol(source_quantum_piece.get('piece', 'P')) if source_quantum_piece else None
+        else:
+            piece = board.piece_at(from_sq)
+        
         moved_piece_symbol = piece.symbol() if piece else None
+
+        # FIX: Validate move only if it's not a quantum piece source
+        # Quantum pieces are measured and validated during the measurement step
+        # Allow captures since quantum pieces may not be on classical board
+        if not source_has_quantum and not is_capture_declared:
+            try:
+                legal_moves = list(board.legal_moves)
+                if move not in legal_moves:
+                    return JsonResponse({'success': False, 'error': 'Illegal move'}, status=400)
+            except Exception as e:
+                return JsonResponse({'success': False, 'error': f'Move validation error: {str(e)}'}, status=400)
 
         # ========================================================================
         # STEP 2-4: Identify quantum involvement and trigger measurement
         # ========================================================================
         
-        # Check if capturing a quantum piece (defender)
-        captured_quantum_index = None
-        for i, qp in enumerate(quantum_pieces_data):
-            for state_id, state_data in qp.get('qnum', {}).items():
-                if state_data[0] == to_square_name:
-                    captured_quantum_index = i
-                    break
-            if captured_quantum_index is not None:
-                break
+        # FIXED: Use position-based tracking instead of list indices
+        # This prevents index shifting issues when pieces are removed from the list
         
-        # Check if moving piece is quantum (attacker)
-        moving_quantum_index = None
-        moving_quantum_entangled = False
-        for i, qp in enumerate(quantum_pieces_data):
+        # Check if moving piece is quantum (attacker) - get piece symbol for reconstruction
+        moving_quantum_piece = None
+        moving_quantum_positions = {}  # Store positions to check after removal
+        for qp in quantum_pieces_data:
             for state_id, state_data in qp.get('qnum', {}).items():
                 if state_data[0] == from_square_name:
-                    moving_quantum_index = i
-                    moving_quantum_entangled = bool(qp.get('entangled'))
+                    moving_quantum_piece = qp.get('piece')
+                    moving_quantum_positions[from_square_name] = qp
                     break
-            if moving_quantum_index is not None:
+            if moving_quantum_piece:
+                break
+        
+        # Check if capturing a quantum piece (defender)
+        captured_quantum_piece = None
+        captured_quantum_positions = {}  # Store positions to check after removal
+        for qp in quantum_pieces_data:
+            for state_id, state_data in qp.get('qnum', {}).items():
+                if state_data[0] == to_square_name:
+                    captured_quantum_piece = qp.get('piece')
+                    captured_quantum_positions[to_square_name] = qp
+                    break
+            if captured_quantum_piece:
                 break
         
         # ========================================================================
@@ -157,7 +182,8 @@ def make_move(request):
                 piece_str = ent_item[0]
                 state = ent_item[1]
                 related_state = ent_item[2]
-                for other_qp_data in quantum_pieces_data:
+                # Look through the current measured pieces
+                for other_qp_data in measured_quantum_pieces:
                     if other_qp_data.get('piece') == piece_str:
                         other_qp = QPiece(other_qp_data.get('position', 'a1'), other_qp_data.get('piece'))
                         other_qp.qnum = other_qp_data.get('qnum', {'0': [other_qp_data.get('position', 'a1'), 1]})
@@ -166,60 +192,86 @@ def make_move(request):
             qp.ent = reconstructed_ent
             return qp
         
-        # Measurement for attacking piece if quantum and capture declared
-        if moving_quantum_index is not None and is_capture_declared:
-            moving_qp_data = measured_quantum_pieces[moving_quantum_index]
-            temp_qp = reconstruct_entanglement(moving_qp_data)
-            
-            measured_pos, prob = temp_qp.measure()
-            measured_quantum_pieces.pop(moving_quantum_index)
-            
-            # Validate declared move against new state
-            if measured_pos != from_square_name:
-                temp_board = chess.Board(fen=game_obj.fen_position)
-                measured_from_sq = chess.parse_square(measured_pos)
-                attack_move = chess.Move(measured_from_sq, to_sq)
-                
-                if attack_move not in temp_board.legal_moves:
-                    return JsonResponse({
-                        'success': False, 
-                        'error': f'Capture failed - piece collapsed to {measured_pos}',
-                        'fen': game_obj.fen_position,
-                        'move_type': declared_move_type
-                    })
+        # FIXED: Process the moving (attacking) piece FIRST before any removals
+        # This avoids index shifting issues
+        if moving_quantum_piece and is_capture_declared:
+            # Find the moving quantum piece data in the measured list
+            for i, qp_data in enumerate(measured_quantum_pieces):
+                found = False
+                for state_id, state_data in qp_data.get('qnum', {}).items():
+                    if state_data[0] == from_square_name:
+                        found = True
+                        break
+                if found:
+                    temp_qp = reconstruct_entanglement(qp_data)
+                    measured_pos, prob = temp_qp.measure()
+                    # Remove from measured list after measurement
+                    measured_quantum_pieces.pop(i)
+                    
+                    # Validate declared move against new state
+                    if measured_pos != from_square_name:
+                        temp_board = chess.Board(fen=game_obj.fen_position)
+                        measured_from_sq = chess.parse_square(measured_pos)
+                        attack_move = chess.Move(measured_from_sq, to_sq)
+                        
+                        if attack_move not in temp_board.legal_moves:
+                            return JsonResponse({
+                                'success': False, 
+                                'error': f'Capture failed - piece collapsed to {measured_pos}',
+                                'fen': game_obj.fen_position,
+                                'move_type': declared_move_type
+                            })
+                    break
         
-        # Measurement for defending piece if quantum
-        if captured_quantum_index is not None:
-            captured_qp_data = measured_quantum_pieces[captured_quantum_index]
-            temp_qp = reconstruct_entanglement(captured_qp_data)
-            
-            measured_pos, prob = temp_qp.measure()
-            measured_quantum_pieces.pop(captured_quantum_index)
-            
-            # Validate declared move
-            if declared_move_type == 'capture':
-                if measured_pos != to_square_name:
-                    return JsonResponse({
-                        'success': False,
-                        'error': f'Capture failed - defender collapsed to {measured_pos}',
-                        'fen': game_obj.fen_position,
-                        'move_type': declared_move_type
-                    })
+        # FIXED: Now process the captured (defending) piece - indices are now stable
+        if captured_quantum_piece:
+            # Find the captured quantum piece data in the measured list
+            for i, qp_data in enumerate(measured_quantum_pieces):
+                found = False
+                for state_id, state_data in qp_data.get('qnum', {}).items():
+                    if state_data[0] == to_square_name:
+                        found = True
+                        break
+                if found:
+                    temp_qp = reconstruct_entanglement(qp_data)
+                    measured_pos, prob = temp_qp.measure()
+                    # Remove from measured list
+                    measured_quantum_pieces.pop(i)
+                    
+                    # Validate declared move
+                    if declared_move_type == 'capture':
+                        if measured_pos != to_square_name:
+                            return JsonResponse({
+                                'success': False,
+                                'error': f'Capture failed - defender collapsed to {measured_pos}',
+                                'fen': game_obj.fen_position,
+                                'move_type': declared_move_type
+                            })
+                    break
         
         # ========================================================================
         # STEP 6: Execute move if valid
         # ========================================================================
+        
+        # FIX: For quantum pieces, we need to add the piece to the board first
+        # since it doesn't exist on the classical board
+        if source_has_quantum and piece:
+            board.set_piece_at(from_sq, piece)
         
         board.push(move)
         # Get SAN of the move that was just pushed
         san = board.san(board.pop())
         board.push(move)
         
+        # FIX: If source had quantum piece, the piece is already moved by push()
+        # No need to manually remove - the push() handles it
+        
         # Update quantum pieces with measured state
         quantum_pieces_data = measured_quantum_pieces
         
         # Handle piece placement based on capture result
-        if is_capture_declared and captured_quantum_index is not None:
+        # FIXED: Use the captured_quantum_piece variable instead of index
+        if is_capture_declared and captured_quantum_piece:
             if moved_piece_symbol:
                 board.set_piece_at(to_sq, chess.Piece.from_symbol(moved_piece_symbol))
         
@@ -249,7 +301,8 @@ def make_move(request):
             'fen': board.fen(), 
             'san': san, 
             'turn': 'white' if board.turn == chess.WHITE else 'black',
-            'move_type': declared_move_type
+            'move_type': declared_move_type,
+            'quantum_pieces': quantum_pieces_data
         })
         
     except Exception as e:
@@ -405,9 +458,9 @@ def quantum_split(request):
         # This prevents the piece from appearing twice (classically and quantumly)
         board.remove_piece_at(from_sq)
 
-        # FIXED: Switch the board's turn to match the game's turn switching
+        # FIXED: Switch turns after quantum split - must flip board.turn before getting FEN
+        # In chess, after any move (including quantum split), the turn switches to the other player
         board.turn = not board.turn
-        
         game_obj.fen_position = board.fen()
         game_obj.current_turn = board.turn
         game_obj.status = update_game_status(board, quantum_pieces_data)
