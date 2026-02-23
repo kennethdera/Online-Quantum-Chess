@@ -123,13 +123,388 @@ def make_move(request):
         # Measurement ONLY happens during captures
         is_capture = board.is_capture(chess.Move(from_sq, to_sq))
         
-        should_measure, conflict_square = quantum_game.should_trigger_measurement(
+        # Check if the SOURCE piece (the one attempting to capture) is a quantum piece
+        # This is a new rule: when a quantum piece attempts to capture, resolve which position is original first
+        quantum_capturer_result = None
+        if is_capture:
+            # Check if the moving piece is a quantum piece at from_square
+            quantum_capturer_result = quantum_game.is_quantum_capturer(from_square_name)
+            if quantum_capturer_result:
+                print(f"DEBUG: Quantum piece at {from_square_name} is attempting to capture - resolving measurement first")
+                # Resolve the quantum capturer measurement before proceeding
+                quantum_capturer_measurement = quantum_game.resolve_quantum_capturer_measurement(
+                    from_square_name, to_square_name, moving_piece_color
+                )
+                
+                if quantum_capturer_measurement.get('success'):
+                    action = quantum_capturer_measurement.get('action')
+                    selected_piece = quantum_capturer_measurement.get('selected_piece')
+                    print(f"DEBUG: Quantum capturer measurement resolved - {quantum_capturer_measurement}")
+                    
+                    if action == 'capture_succeeds':
+                        # The RIGHT piece is capturing - it's actually at from_square
+                        # 1. Remove other instances from board (FEN)
+                        # 2. Execute the capture
+                        # 3. Change capturing piece to classical piece
+                        
+                        other_positions_removed = quantum_capturer_measurement.get('other_positions_removed', [])
+                        
+                        # Remove other quantum positions from the board
+                        for pos, prob in other_positions_removed:
+                            other_sq = chess.parse_square(pos)
+                            board.remove_piece_at(other_sq)
+                            print(f"DEBUG: Removed {selected_piece} from {pos} (other quantum position)")
+                        
+                        # The capture will be processed normally below
+                        # The piece will become classical after the capture
+                        quantum_capturer_result = quantum_capturer_measurement
+                        
+                    elif action == 'capture_fails_make_classical':
+                        # The WRONG piece is attempting to capture - piece is actually at another position
+                        # Capture fails, piece becomes classical at actual position
+                        
+                        actual_position = quantum_capturer_measurement.get('actual_position')
+                        
+                        print(f"DEBUG: Capture fails - {selected_piece} is NOT at {from_square_name}")
+                        print(f"DEBUG: Actual position is at {actual_position} - converting to classical")
+                        
+                        # Remove the piece from from_square (it was never there)
+                        board.remove_piece_at(from_sq)
+                        print(f"DEBUG: Removed fake piece from {from_square_name}")
+                        
+                        # Place the piece as classical at the actual position on the board
+                        if actual_position:
+                            actual_sq = chess.parse_square(actual_position)
+                            board.set_piece_at(actual_sq, chess.Piece.from_symbol(selected_piece))
+                            print(f"DEBUG: Placed classical piece {selected_piece} at {actual_position}")
+                        
+                        # ALSO measure any quantum piece at the destination square (to_square)
+                        # This is important - the defender also needs to be resolved!
+                        import random as random_module
+                        defender_measured = False
+                        defender_actual_pos = None
+                        defender_piece_symbol = None
+                        
+                        for i, qp in enumerate(quantum_game.quantum_pieces):
+                            for state_id, state_data in qp.qnum.items():
+                                if state_data[0] == to_square_name:
+                                    # There's a quantum piece at the destination - measure it!
+                                    defender_piece_symbol = str(qp.piece)
+                                    print(f"DEBUG: Found quantum defender {defender_piece_symbol} at {to_square_name} - measuring it")
+                                    
+                                    # Get all positions for this piece
+                                    all_positions = [(sid, sd[0], sd[1]) for sid, sd in qp.qnum.items()]
+                                    
+                                    # Randomly determine actual position
+                                    total_prob = sum(p for _, _, p in all_positions)
+                                    rand = random_module.random()
+                                    cum_prob = 0
+                                    
+                                    for sid, pos, prob in all_positions:
+                                        cum_prob += prob / total_prob
+                                        if rand < cum_prob:
+                                            defender_actual_pos = pos
+                                            break
+                                    
+                                    if defender_actual_pos is None:
+                                        defender_actual_pos = all_positions[0][1]
+                                    
+                                    print(f"DEBUG: Defender {defender_piece_symbol} measured - actual position: {defender_actual_pos}")
+                                    
+                                    # Remove from destination (fake position)
+                                    board.remove_piece_at(to_sq)
+                                    
+                                    # Place at actual position as classical
+                                    if defender_actual_pos:
+                                        def_actual_sq = chess.parse_square(defender_actual_pos)
+                                        board.set_piece_at(def_actual_sq, chess.Piece.from_symbol(defender_piece_symbol))
+                                        print(f"DEBUG: Placed defender {defender_piece_symbol} at actual position {defender_actual_pos}")
+                                    
+                                    # Don't add to quantum_pieces - it's now classical
+                                    defender_measured = True
+                                    break
+                            
+                            if defender_measured:
+                                break
+                        
+                        # Remove the quantum pieces from quantum_pieces_data (they become classical)
+                        quantum_pieces_data = []
+                        for qp in quantum_game.quantum_pieces:
+                            piece_str = str(qp.piece)
+                            
+                            # Skip the attacker piece (became classical)
+                            if piece_str == selected_piece:
+                                print(f"DEBUG: Removing quantum piece {selected_piece} from quantum_pieces (became classical)")
+                                continue
+                            
+                            # Skip the defender piece if it was measured
+                            if defender_measured and piece_str == defender_piece_symbol:
+                                print(f"DEBUG: Removing quantum piece {defender_piece_symbol} from quantum_pieces (became classical)")
+                                continue
+                            
+                            quantum_pieces_data.append({
+                                'piece': piece_str,
+                                'qnum': qp.qnum,
+                                'entangled': [[str(e[0].piece) if e[0] else None, e[1], e[2]] for e in qp.ent]
+                            })
+                        
+                        # IMPORTANT: DO NOT complete the capture - the piece was never at from_square
+                        # Update game state without making the capture move
+                        game_obj.quantum_pieces = quantum_pieces_data
+                        game_obj.fen_position = board.fen()
+                        game_obj.current_turn = not game_obj.current_turn
+                        game_obj.save()
+                        
+                        # Record measurement in move history
+                        move_count = Move.objects.filter(game=game_obj).count()
+                        measurement_note = f'Measurement: {selected_piece} not at {from_square_name}, at {actual_position}'
+                        if defender_measured:
+                            measurement_note += f'; {defender_piece_symbol} at {to_square_name} measured to {defender_actual_pos}'
+                        
+                        Move.objects.create(
+                            game=game_obj,
+                            move_number=move_count // 2 + 1,
+                            is_white_move=moving_piece_color == chess.WHITE,
+                            move_type='measure',
+                            from_square=from_sq,
+                            to_square=to_sq,
+                            promotion=None,
+                            san=measurement_note,
+                            fen_after=game_obj.fen_position
+                        )
+                        
+                        return JsonResponse({
+                            'success': True,
+                            'fen': game_obj.fen_position,
+                            'message': f'Capture failed! {selected_piece} was not at {from_square_name}. Found at {actual_position}. Defender {defender_piece_symbol} at {to_square_name} measured to {defender_actual_pos}.' if defender_measured else f'Capture failed! {selected_piece} was not at {from_square_name}. Found at {actual_position}.',
+                            'turn': 'white' if game_obj.current_turn else 'black',
+                            'quantum_pieces': quantum_pieces_data,
+                            'measurement': {
+                                'action': 'capture_fails_make_classical',
+                                'selected_piece': selected_piece,
+                                'attempted_from': from_square_name,
+                                'actual_position': actual_position,
+                                'defender_measured': defender_measured,
+                                'defender_piece': defender_piece_symbol,
+                                'defender_actual_position': defender_actual_pos
+                            } if defender_measured else {
+                                'action': 'capture_fails_make_classical',
+                                'selected_piece': selected_piece,
+                                'attempted_from': from_square_name,
+                                'actual_position': actual_position
+                            }
+                        })
+                    
+                    elif action == 'capture_fails_no_position':
+                        # The piece doesn't exist at all
+                        print(f"DEBUG: Capture fails - {selected_piece} does NOT exist at {from_square_name}")
+                        
+                        # Remove from board
+                        board.remove_piece_at(from_sq)
+                        
+                        # Remove from quantum pieces
+                        quantum_pieces_data = []
+                        for qp in quantum_game.quantum_pieces:
+                            if str(qp.piece) != selected_piece:
+                                quantum_pieces_data.append({
+                                    'piece': str(qp.piece),
+                                    'qnum': qp.qnum,
+                                    'entangled': [[str(e[0].piece) if e[0] else None, e[1], e[2]] for e in qp.ent]
+                                })
+                        
+                        # Update game state without making the capture move
+                        game_obj.quantum_pieces = quantum_pieces_data
+                        game_obj.fen_position = board.fen()
+                        game_obj.current_turn = not game_obj.current_turn
+                        game_obj.save()
+                        
+                        # Record measurement
+                        move_count = Move.objects.filter(game=game_obj).count()
+                        Move.objects.create(
+                            game=game_obj,
+                            move_number=move_count // 2 + 1,
+                            is_white_move=moving_piece_color == chess.WHITE,
+                            move_type='measure',
+                            from_square=from_sq,
+                            to_square=to_sq,
+                            promotion=None,
+                            san=f'Measurement: {selected_piece} does not exist at {from_square_name}',
+                            fen_after=game_obj.fen_position
+                        )
+                        
+                        return JsonResponse({
+                            'success': True,
+                            'fen': game_obj.fen_position,
+                            'message': f'Capture failed! {selected_piece} does not exist at {from_square_name}.',
+                            'turn': 'white' if game_obj.current_turn else 'black',
+                            'quantum_pieces': quantum_pieces_data,
+                            'measurement': {
+                                'action': 'capture_fails_no_position',
+                                'selected_piece': selected_piece,
+                                'attempted_from': from_square_name
+                            }
+                        })
+        
+        should_measure, conflict_square, other_square = quantum_game.should_trigger_measurement(
             from_square_name, to_square_name, moving_piece_color, is_capture
         )
         
         measurement_result = None
         
+        # BUG FIX: When BOTH source and destination have quantum pieces, measure BOTH!
+        # other_square contains the other square that needs measurement
         if should_measure and conflict_square:
+            
+            # Check if defender at destination is also a quantum piece - this is the key case!
+            defender_is_quantum = quantum_game.find_quantum_piece_at(to_square_name)
+            
+            # Only use quantum vs quantum method when BOTH attacker and defender are quantum
+            if other_square and other_square != conflict_square and defender_is_quantum:
+                print(f"DEBUG: Quantum vs Quantum capture detected!")
+                
+                # Use the new unified method that handles all three instances
+                quantum_vs_quantum_result = quantum_game.resolve_quantum_vs_quantum_capture(
+                    from_square_name, to_square_name, moving_piece_color
+                )
+                
+                if quantum_vs_quantum_result.get('success'):
+                    instance = quantum_vs_quantum_result.get('instance')
+                    action = quantum_vs_quantum_result.get('action')
+                    attacker_piece = quantum_vs_quantum_result.get('attacker_piece')
+                    defender_piece = quantum_vs_quantum_result.get('defender_piece')
+                    
+                    print(f"DEBUG: Quantum vs Quantum capture - Instance {instance}: {action}")
+                    print(f"DEBUG: {quantum_vs_quantum_result.get('message')}")
+                    
+                    # Handle each instance
+                    if instance == 1:
+                        # Instance 1: Real Attacker + Real Defender - Capture succeeds
+                        # Remove fake pieces of both from the board
+                        attacker_other = quantum_vs_quantum_result.get('attacker_other_positions', [])
+                        defender_other = quantum_vs_quantum_result.get('defender_other_positions', [])
+                        
+                        for pos, prob in attacker_other:
+                            other_sq = chess.parse_square(pos)
+                            board.remove_piece_at(other_sq)
+                            print(f"DEBUG: Removed attacker fake piece from {pos}")
+                        
+                        for pos, prob in defender_other:
+                            other_sq = chess.parse_square(pos)
+                            board.remove_piece_at(other_sq)
+                            print(f"DEBUG: Removed defender fake piece from {pos}")
+                        
+                        # Remove both pieces from quantum_pieces (they become classical)
+                        quantum_pieces_data = []
+                        
+                    elif instance == 2:
+                        # Instance 2: Real Attacker + Fake Defender - Capture fails
+                        attacker_other = quantum_vs_quantum_result.get('attacker_other_positions', [])
+                        defender_actual = quantum_vs_quantum_result.get('defender_actual_position')
+                        
+                        # Remove attacker's other positions from board
+                        for pos, prob in attacker_other:
+                            other_sq = chess.parse_square(pos)
+                            board.remove_piece_at(other_sq)
+                        
+                        # Remove fake defender from to_square
+                        board.remove_piece_at(to_sq)
+                        
+                        # Place defender at actual position as classical
+                        if defender_actual:
+                            def_sq = chess.parse_square(defender_actual)
+                            board.set_piece_at(def_sq, chess.Piece.from_symbol(defender_piece))
+                        
+                        # Update FEN and return without completing capture
+                        game_obj.fen_position = board.fen()
+                        game_obj.current_turn = not game_obj.current_turn
+                        game_obj.save()
+                        
+                        # Record measurement
+                        move_count = Move.objects.filter(game=game_obj).count()
+                        Move.objects.create(
+                            game=game_obj,
+                            move_number=move_count // 2 + 1,
+                            is_white_move=moving_piece_color == chess.WHITE,
+                            move_type='measure',
+                            from_square=from_sq,
+                            to_square=to_sq,
+                            promotion=None,
+                            san=f'Measurement: Instance 2 - Real attacker, fake defender',
+                            fen_after=game_obj.fen_position
+                        )
+                        
+                        return JsonResponse({
+                            'success': True,
+                            'fen': game_obj.fen_position,
+                            'message': f'Instance 2: Real attacker {attacker_piece} at {from_square_name}, fake defender {defender_piece} at {to_square_name} (actual: {defender_actual})',
+                            'turn': 'white' if game_obj.current_turn else 'black',
+                            'quantum_pieces': [],
+                            'measurement': {
+                                'instance': 2,
+                                'action': 'capture_fails',
+                                'attacker_piece': attacker_piece,
+                                'defender_piece': defender_piece,
+                                'defender_actual_position': defender_actual
+                            }
+                        })
+                    
+                    elif instance == 3:
+                        # Instance 3: Fake Attacker + Fake Defender - Both fake
+                        attacker_actual = quantum_vs_quantum_result.get('attacker_actual_position')
+                        defender_actual = quantum_vs_quantum_result.get('defender_actual_position')
+                        
+                        # Remove fake pieces from both attempted squares
+                        board.remove_piece_at(from_sq)
+                        board.remove_piece_at(to_sq)
+                        
+                        # Place pieces at their actual positions as classical
+                        if attacker_actual:
+                            att_sq = chess.parse_square(attacker_actual)
+                            board.set_piece_at(att_sq, chess.Piece.from_symbol(attacker_piece))
+                        
+                        if defender_actual:
+                            def_sq = chess.parse_square(defender_actual)
+                            board.set_piece_at(def_sq, chess.Piece.from_symbol(defender_piece))
+                        
+                        # Update FEN and return without completing capture
+                        game_obj.fen_position = board.fen()
+                        game_obj.current_turn = not game_obj.current_turn
+                        game_obj.save()
+                        
+                        # Record measurement
+                        move_count = Move.objects.filter(game=game_obj).count()
+                        Move.objects.create(
+                            game=game_obj,
+                            move_number=move_count // 2 + 1,
+                            is_white_move=moving_piece_color == chess.WHITE,
+                            move_type='measure',
+                            from_square=from_sq,
+                            to_square=to_sq,
+                            promotion=None,
+                            san=f'Measurement: Instance 3 - Both fake',
+                            fen_after=game_obj.fen_position
+                        )
+                        
+                        return JsonResponse({
+                            'success': True,
+                            'fen': game_obj.fen_position,
+                            'message': f'Instance 3: Fake attacker {attacker_piece} at {from_square_name} (actual: {attacker_actual}), fake defender {defender_piece} at {to_square_name} (actual: {defender_actual})',
+                            'turn': 'white' if game_obj.current_turn else 'black',
+                            'quantum_pieces': [],
+                            'measurement': {
+                                'instance': 3,
+                                'action': 'both_fake',
+                                'attacker_piece': attacker_piece,
+                                'defender_piece': defender_piece,
+                                'attacker_actual_position': attacker_actual,
+                                'defender_actual_position': defender_actual
+                            }
+                        })
+                    
+                    # For instance 1 (capture succeeds), continue to process the capture below
+                    measurement_result = quantum_vs_quantum_result
+            
+            # Now measure the defender (destination square) if there's still a quantum piece there
             print(f"DEBUG: Measurement triggered at {conflict_square} (capture mode)")
 
             # Collect all positions of quantum pieces at the conflict square BEFORE measurement

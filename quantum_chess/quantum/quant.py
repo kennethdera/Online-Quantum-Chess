@@ -413,13 +413,14 @@ class QuantumGame:
         return conflicts
     
     def should_trigger_measurement(self, from_square: str, to_square: str, 
-                                   moving_piece_color: bool, is_capture: bool = False) -> Tuple[bool, Optional[str]]:
+                                   moving_piece_color: bool, is_capture: bool = False) -> Tuple[bool, Optional[str], Optional[str]]:
         """
         Check if a move should trigger a measurement according to game rules.
         
-        A measurement is ONLY triggered when:
+        A measurement is triggered when:
         1. A piece is CAPTURING another piece (destination has a quantum piece in superposition)
         2. A piece is BEING CAPTURED (source had a quantum piece that's being captured)
+        3. BOTH source and destination have quantum pieces - BOTH need to be measured!
         
         Args:
             from_square: Source square of the move
@@ -428,28 +429,52 @@ class QuantumGame:
             is_capture: Whether this is a capture move
         
         Returns:
-            Tuple of (should_measure, conflict_square)
+            Tuple of (should_measure, conflict_square, other_square)
+            - conflict_square: the primary square to measure
+            - other_square: the other square that also has a quantum piece (if any)
         """
         # Measurement can ONLY happen during a capture
         if not is_capture:
-            return False, None
+            return False, None, None
         
         # Check if the destination square has a quantum piece that could be captured
-        # This is case 1: The moving piece is CAPTURING a quantum piece
+        dest_has_quantum = False
         for qp in self.quantum_pieces:
             for state_id, state_data in qp.qnum.items():
                 if state_data[0] == to_square:
-                    # Found a quantum piece at the destination - this is a capture of a quantum piece
-                    # Need to measure to determine if the capture succeeds
-                    return True, to_square
+                    dest_has_quantum = True
+                    break
+            if dest_has_quantum:
+                break
         
-        # Check if the source square has a quantum piece that is being "captured"
-        # This is case 2: The piece at source is being captured (by being moved away)
-        # Actually, this case is when moving FROM a square that has a quantum piece
-        # and another piece is also there - but since we check is_capture, we need
-        # to check if this is the destination piece being captured
+        # Check if the source square has a quantum piece (the attacker in superposition)
+        source_has_quantum = False
+        for qp in self.quantum_pieces:
+            for state_id, state_data in qp.qnum.items():
+                if state_data[0] == from_square:
+                    source_has_quantum = True
+                    break
+            if source_has_quantum:
+                break
         
-        return False, None
+        # BUG FIX: When BOTH squares have quantum pieces, BOTH need to be measured!
+        # This happens when a quantum split piece attempts to capture another quantum piece
+        if source_has_quantum and dest_has_quantum:
+            # Both attacker and defender are quantum pieces
+            # Need to measure both - return destination as primary, source as other
+            return True, to_square, from_square
+        
+        # Check if the destination square has a quantum piece that could be captured
+        # This is case: The moving piece is CAPTURING a quantum piece
+        if dest_has_quantum:
+            return True, to_square, None
+        
+        # Check if the source square has a quantum piece
+        # This is case: The piece at source is being captured (by being moved away)
+        if source_has_quantum:
+            return True, from_square, None
+        
+        return False, None, None
     
     def should_trigger_measurement_on_being_captured(self, from_square: str, to_square: str,
                                                       moving_piece_color: bool) -> Tuple[bool, Optional[str]]:
@@ -724,6 +749,349 @@ class QuantumGame:
             return True, target_occupant
         
         return False, target_occupant  # There's a conflict, measurement needed
+    
+    def is_quantum_capturer(self, from_square: str) -> Optional[Tuple['QuantumPiece', str, float]]:
+        """
+        Check if the piece at from_square is a quantum piece in superposition.
+        
+        This is used when a quantum piece attempts to capture - we need to resolve
+        which position is the "original" before allowing the capture.
+        
+        Args:
+            from_square: Source square of the move (where the capturing piece is)
+        
+        Returns:
+            Tuple of (quantum_piece, state_id, probability) if quantum, None otherwise
+        """
+        for qp in self.quantum_pieces:
+            for state_id, state_data in qp.qnum.items():
+                if state_data[0] == from_square:
+                    # Found a quantum piece at the source square
+                    return qp, state_id, state_data[1]
+        return None
+    
+    def get_quantum_capturer_all_positions(self, from_square: str) -> Optional[Tuple['QuantumPiece', List[Tuple[str, float]]]]:
+        """
+        Get all positions of a quantum piece at from_square.
+        
+        Args:
+            from_square: Source square of the move
+        
+        Returns:
+            Tuple of (quantum_piece, list of (position, probability)) if quantum, None otherwise
+        """
+        for qp in self.quantum_pieces:
+            # Check if this quantum piece has any state at from_square
+            has_from_square = False
+            positions = []
+            for state_id, state_data in qp.qnum.items():
+                positions.append((state_data[0], state_data[1]))
+                if state_data[0] == from_square:
+                    has_from_square = True
+            
+            if has_from_square:
+                return qp, positions
+        return None
+    
+    def resolve_quantum_capturer_measurement(self, from_square: str, to_square: str,
+                                               capturing_piece_color: bool) -> Dict[str, Any]:
+        """
+        Resolve measurement when a quantum piece attempts to capture.
+        
+        Rules:
+        - First resolve which position is the "original" (actual position of the piece)
+        - If the right piece (actual position) is at from_square and attempts to capture:
+          1. Remove other instances from board (FEN)
+          2. Execute the capture
+          3. Change capturing piece to classical piece
+        - If the wrong piece (not at from_square) - capture fails, piece is at another position:
+          1. Capture fails (no piece at from_square to capture)
+          2. The piece becomes classical at its actual position
+        
+        Args:
+            from_square: Source square where capture is attempted
+            to_square: Target square of the capture
+            capturing_piece_color: Color of the capturing piece
+        
+        Returns:
+            Dictionary with measurement results and action to take
+        """
+        # Find the quantum piece that's attempting to capture
+        capturer_result = self.get_quantum_capturer_all_positions(from_square)
+        
+        if not capturer_result:
+            return {'success': False, 'error': 'No quantum piece at source square'}
+        
+        qp, positions = capturer_result
+        piece_symbol = str(qp.piece)
+        
+        # Get total probability at from_square vs other positions
+        prob_at_from = 0
+        other_positions = []
+        
+        for pos, prob in positions:
+            if pos == from_square:
+                prob_at_from = prob
+            else:
+                other_positions.append((pos, prob))
+        
+        total_prob = sum(p for _, p in positions)
+        
+        # Randomly determine if piece is at from_square (attempting capture)
+        # or at another position
+        rand = random.random()
+        piece_exists_at_from = rand < (prob_at_from / total_prob) if total_prob > 0 else False
+        
+        if piece_exists_at_from:
+            # The RIGHT piece is capturing - it's actually at from_square
+            # Remove other instances, let capture succeed, make piece classical
+            
+            # Remove other positions from quantum state
+            states_to_remove = []
+            for state_id in qp.qnum.keys():
+                if qp.qnum[state_id][0] != from_square:
+                    states_to_remove.append(state_id)
+            
+            for state_id in states_to_remove:
+                del qp.qnum[state_id]
+            
+            # Set to 100% probability at from_square
+            for state_id in qp.qnum.keys():
+                qp.qnum[state_id] = [from_square, 1.0]
+            
+            return {
+                'success': True,
+                'action': 'capture_succeeds',
+                'selected_piece': piece_symbol,
+                'from_square': from_square,
+                'to_square': to_square,
+                'other_positions_removed': other_positions,
+                'outcome': 'right_piece_capturing'
+            }
+        else:
+            # The WRONG piece is attempting to capture - piece is actually at another position
+            # Capture fails, piece becomes classical at actual position
+            
+            if other_positions:
+                # Get the actual position (highest probability or first)
+                actual_position, actual_prob = max(other_positions, key=lambda x: x[1])
+                
+                # Collapse to the actual position
+                qp.qnum.clear()
+                qp.qnum['0'] = [actual_position, 1.0]
+                
+                return {
+                    'success': True,
+                    'action': 'capture_fails_make_classical',
+                    'selected_piece': piece_symbol,
+                    'from_square': from_square,
+                    'to_square': to_square,
+                    'actual_position': actual_position,
+                    'outcome': 'wrong_piece_attempting_capture'
+                }
+            
+            return {
+                'success': True,
+                'action': 'capture_fails_no_position',
+                'selected_piece': piece_symbol,
+                'from_square': from_square,
+                'outcome': 'piece_does_not_exist_at_capture_square'
+            }
+
+    def resolve_quantum_vs_quantum_capture(self, from_square: str, to_square: str,
+                                           capturing_piece_color: bool) -> Dict[str, Any]:
+        """
+        Resolve measurement when a QUANTUM piece attempts to capture another QUANTUM piece.
+        
+        Three possible outcomes based on which pieces are "real":
+        
+        Instance 1 (Real Attacker + Real Defender):
+        - Both pieces exist at their respective squares
+        - Remove fake pieces of both
+        - Attacker captures defender
+        - Attacker piece changes to classical piece
+        
+        Instance 2 (Real Attacker + Fake Defender):
+        - Attacker is at from_square, but defender is NOT at to_square
+        - Remove fake instances of both defender and attacker
+        - Attacker remains in original square (capture fails)
+        
+        Instance 3 (Fake Attacker + Fake Defender):
+        - Neither piece exists at the attempted squares
+        - Fake pieces are removed from board
+        - Attacker remains on original square (capture fails)
+        
+        Args:
+            from_square: Source square where capture is attempted (attacker's position)
+            to_square: Target square of the capture (defender's position)
+            capturing_piece_color: Color of the capturing piece
+        
+        Returns:
+            Dictionary with measurement results and action to take:
+            - instance: 1, 2, or 3
+            - action: 'capture_succeeds', 'capture_fails', or 'both_fake'
+            - attacker_piece: The attacking piece symbol
+            - defender_piece: The defending piece symbol
+            - attacker_actual_position: Where attacker actually is
+            - defender_actual_position: Where defender actually is
+            - attacker_other_positions: Other positions of attacker to remove
+            - defender_other_positions: Other positions of defender to remove
+        """
+        # Get the quantum piece at from_square (attacker)
+        attacker_result = self.get_quantum_capturer_all_positions(from_square)
+        if not attacker_result:
+            return {'success': False, 'error': 'No quantum piece at attacker square'}
+        
+        attacker_qp, attacker_positions = attacker_result
+        attacker_piece = str(attacker_qp.piece)
+        
+        # Get the quantum piece at to_square (defender)
+        defender_result = self.find_quantum_piece_at(to_square)
+        if not defender_result:
+            return {'success': False, 'error': 'No quantum piece at defender square'}
+        
+        defender_qp, defender_state = defender_result
+        defender_piece = str(defender_qp.piece)
+        
+        # Get all positions for both pieces
+        attacker_pos_list = [(pos, prob) for pos, prob in attacker_positions]
+        defender_positions_all = [(state_id, data[0], data[1]) for state_id, data in defender_qp.qnum.items()]
+        
+        # Determine probabilities
+        attacker_prob_at_from = sum(p for pos, p in attacker_pos_list if pos == from_square)
+        attacker_total_prob = sum(p for _, p in attacker_pos_list)
+        
+        defender_prob_at_to = sum(data[1] for state_id, pos, data in defender_positions_all if pos == to_square)
+        defender_total_prob = sum(data[1] for _, _, data in defender_positions_all)
+        
+        # Random measurement for attacker
+        rand_attacker = random.random()
+        attacker_exists = rand_attacker < (attacker_prob_at_from / attacker_total_prob) if attacker_total_prob > 0 else False
+        
+        # Random measurement for defender
+        rand_defender = random.random()
+        defender_exists = rand_defender < (defender_prob_at_to / defender_total_prob) if defender_total_prob > 0 else False
+        
+        # Determine which instance this is
+        if attacker_exists and defender_exists:
+            # Instance 1: Real Attacker + Real Defender
+            # Both pieces exist - capture succeeds
+            
+            # Get other positions to remove
+            attacker_other = [(pos, prob) for pos, prob in attacker_pos_list if pos != from_square]
+            defender_other = [(pos, prob) for state_id, pos, prob in defender_positions_all if pos != to_square]
+            
+            # Collapse attacker to from_square (100%)
+            for state_id in list(attacker_qp.qnum.keys()):
+                if attacker_qp.qnum[state_id][0] != from_square:
+                    del attacker_qp.qnum[state_id]
+            for state_id in attacker_qp.qnum.keys():
+                attacker_qp.qnum[state_id] = [from_square, 1.0]
+            
+            # Collapse defender to to_square (will be captured)
+            for state_id in list(defender_qp.qnum.keys()):
+                if defender_qp.qnum[state_id][0] != to_square:
+                    del defender_qp.qnum[state_id]
+            for state_id in defender_qp.qnum.keys():
+                defender_qp.qnum[state_id] = [to_square, 1.0]
+            
+            return {
+                'success': True,
+                'instance': 1,
+                'action': 'capture_succeeds',
+                'attacker_piece': attacker_piece,
+                'defender_piece': defender_piece,
+                'from_square': from_square,
+                'to_square': to_square,
+                'attacker_actual_position': from_square,
+                'defender_actual_position': to_square,
+                'attacker_other_positions': attacker_other,
+                'defender_other_positions': defender_other,
+                'message': f'Instance 1: Real capture - {attacker_piece} at {from_square} captures {defender_piece} at {to_square}'
+            }
+            
+        elif attacker_exists and not defender_exists:
+            # Instance 2: Real Attacker + Fake Defender
+            # Attacker is real, but defender is NOT at to_square
+            
+            # Find where defender actually is
+            defender_actual_pos = None
+            defender_other = []
+            for state_id, pos, prob in defender_positions_all:
+                if pos != to_square:
+                    if defender_actual_pos is None or prob > defender_other[-1][1] if defender_other else False:
+                        defender_actual_pos = pos
+                    defender_other.append((pos, prob))
+            
+            # Get attacker's other positions to remove
+            attacker_other = [(pos, prob) for pos, prob in attacker_pos_list if pos != from_square]
+            
+            # Collapse attacker to from_square (becomes classical)
+            for state_id in list(attacker_qp.qnum.keys()):
+                if attacker_qp.qnum[state_id][0] != from_square:
+                    del attacker_qp.qnum[state_id]
+            for state_id in attacker_qp.qnum.keys():
+                attacker_qp.qnum[state_id] = [from_square, 1.0]
+            
+            # Remove defender quantum piece entirely (becomes classical at actual position)
+            
+            return {
+                'success': True,
+                'instance': 2,
+                'action': 'capture_fails',
+                'attacker_piece': attacker_piece,
+                'defender_piece': defender_piece,
+                'from_square': from_square,
+                'to_square': to_square,
+                'attacker_actual_position': from_square,
+                'defender_actual_position': defender_actual_pos,
+                'attacker_other_positions': attacker_other,
+                'defender_other_positions': defender_other,
+                'message': f'Instance 2: Real attacker {attacker_piece} at {from_square}, fake defender {defender_piece} at {to_square} (actual: {defender_actual_pos})'
+            }
+            
+        elif not attacker_exists and not defender_exists:
+            # Instance 3: Fake Attacker + Fake Defender
+            # Neither piece exists at the attempted squares
+            
+            # Find where attacker actually is
+            attacker_actual_pos = None
+            attacker_other = []
+            for pos, prob in attacker_pos_list:
+                if pos != from_square:
+                    if attacker_actual_pos is None or prob > (attacker_other[-1][1] if attacker_other else 0):
+                        attacker_actual_pos = pos
+                    attacker_other.append((pos, prob))
+            
+            # Find where defender actually is
+            defender_actual_pos = None
+            defender_other = []
+            for state_id, pos, prob in defender_positions_all:
+                if pos != to_square:
+                    if defender_actual_pos is None or prob > (defender_other[-1][1] if defender_other else 0):
+                        defender_actual_pos = pos
+                    defender_other.append((pos, prob))
+            
+            return {
+                'success': True,
+                'instance': 3,
+                'action': 'both_fake',
+                'attacker_piece': attacker_piece,
+                'defender_piece': defender_piece,
+                'from_square': from_square,
+                'to_square': to_square,
+                'attacker_actual_position': attacker_actual_pos,
+                'defender_actual_position': defender_actual_pos,
+                'attacker_other_positions': attacker_other,
+                'defender_other_positions': defender_other,
+                'message': f'Instance 3: Fake attacker {attacker_piece} at {from_square} (actual: {attacker_actual_pos}), fake defender {defender_piece} at {to_square} (actual: {defender_actual_pos})'
+            }
+        
+        # Edge case - shouldn't reach here
+        return {
+            'success': False,
+            'error': 'Unexpected measurement result'
+        }
 
 
 

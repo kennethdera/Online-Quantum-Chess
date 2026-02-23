@@ -10,7 +10,6 @@
     
     <!-- Chessboard.js CSS -->
     <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
-    
     <style>
         body {
             background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
@@ -132,5 +131,7 @@
     <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
     
     {% block extra_js %}{% endblock %}
+    {% load sweetify %}
+    {% sweetify %}
 </body>
 </html>

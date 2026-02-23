@@ -1,30 +1,32 @@
-# Implementation TODO - Quantum Chess Measurement Rules
+# Quantum Chess Capture Rules Implementation - COMPLETED
 
 ## Task Summary
-Implement measurement rules where measuring happens only when a piece is capturing or being captured.
+Implemented measurement game rule update for when a quantum piece attempts to capture another quantum piece.
 
-## Rules to Implement:
-1. Measurement can ONLY happen when:
-   - A piece is CAPTURING another piece
-   - A piece is BEING CAPTURED by another piece
+## Three Capture Instances Implemented:
 
-2. If quantum piece is being captured:
-   - Resolve which instance is the right position
-   - If the captured piece IS the right one: remove other instances, let opponent capture
-   - If the captured piece is NOT the right one: return opponent piece to original square, remove false positions, turn right position to classical piece
+### Instance 1: Real Attacker + Real Defender
+- Both pieces exist at their respective squares
+- Remove fake pieces of both
+- Attacker captures defender
+- Attacker piece changes to classical piece
 
-## Implementation Steps:
+### Instance 2: Real Attacker + Fake Defender
+- Attacker is at from_square, but defender is NOT at to_square
+- Remove fake instances of both defender and attacker
+- Attacker remains in original square (capture fails)
 
-### Step 1: Update quantum_chess/quantum/quant.py
-- [x] Modify `should_trigger_measurement()` to check if move is a capture
-- [x] Add `should_trigger_measurement_on_being_captured()` method
-- [x] Add `resolve_capture_measurement()` method for handling capture scenarios
+### Instance 3: Fake Attacker + Fake Defender
+- Neither piece exists at the attempted squares
+- Fake pieces are removed from board
+- Attacker remains on original square (capture fails)
 
-### Step 2: Update quantum_chess/views.py
-- [x] Update make_move to handle measurement outcomes based on capture rules
-- [x] Add logic for when captured piece IS the right one vs NOT the right one
+## Implementation Complete:
 
-### Step 3: Test the implementation
-- [ ] Verify measurements only trigger on captures
-- [ ] Verify "right piece" case: remove other instances, allow capture
-- [ ] Verify "wrong piece" case: return opponent to original, make right position classical
+- [x] 1. Add resolve_quantum_vs_quantum_capture method in quant.py
+- [x] 2. Fix indentation issues in quant.py
+- [x] 3. Update views.py to use new method when both squares have quantum pieces
+
+## Files Modified:
+1. quantum_chess/quantum/quant.py - Added new method resolve_quantum_vs_quantum_capture
+2. quantum_chess/views.py - Updated to use the new unified method for quantum vs quantum captures
