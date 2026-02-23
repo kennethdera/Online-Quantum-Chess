@@ -56,7 +56,15 @@
         padding: 10px;
         margin-top: 10px;
     }
+    
+    /* Quantum split square border */
+    .quantum-split-square {
+        border: 3px solid #9d4edd !important;
+        box-shadow: inset 0 0 10px rgba(157, 78, 221, 0.5) !important;
+        box-sizing: border-box;
+    }
 </style>
+
 {% endblock %}
 
 {% block content %}
@@ -325,8 +333,8 @@
                 if (response.fen) {
                     // Load the new position - this updates game.turn() and board
                     game.load(response.fen);
-                    // Don't call board.position() separately - it causes flicker
-                    // The board will update via chessboard.js internal state
+                    // Update the visual chessboard.js board - this is REQUIRED for showing pieces
+                    board.position(response.fen);
                     console.log('After loading FEN, game turn is now:', game.turn());
                     // Update FEN display
                     $('#gameFen').text(response.fen);
@@ -335,8 +343,10 @@
                 if (response.quantum_pieces) {
                     quantumPieces = response.quantum_pieces;
                     updateQuantumPiecesDisplay();
-                    // Delay rendering to ensure board is ready
-                    setTimeout(renderQuantumPiecesOnBoard, 100);
+                    // Clear any existing quantum ghost pieces and re-render
+                    $('#board .quantum-ghost').remove();
+                    // Small delay to ensure board DOM is ready
+                    setTimeout(renderQuantumPiecesOnBoard, 50);
                 }
                 // Update turn display from server
                 if (response.turn) {
@@ -395,7 +405,10 @@
         $('#board [class*="square-"]').css('background', '');
         // Also remove any highlight classes if they exist
         $('#board .square-55d, #board .square-55l').css('background', '');
+        // Remove quantum split square borders
+        $('#board .quantum-split-square').removeClass('quantum-split-square');
     }
+
 
     
     function updateBoard() {
@@ -546,9 +559,13 @@
                 // Position the ghost piece
                 $square.css('position', 'relative');
                 $square.append($ghost);
+                
+                // Add border to the square to indicate quantum split
+                $square.addClass('quantum-split-square');
             }
         });
     }
+
 
 
 

@@ -1,30 +1,30 @@
-# TODO: Fix Quantum Rules Bugs in Django Project
+# Implementation TODO - Quantum Chess Measurement Rules
 
-## Summary
-The Django project's quantum chess implementation has bugs in the quantum rules compared to the reference Code/Quant.py. The main issues are in the `detangle()` and `measure()` methods.
+## Task Summary
+Implement measurement rules where measuring happens only when a piece is capturing or being captured.
 
-## Bugs Identified
+## Rules to Implement:
+1. Measurement can ONLY happen when:
+   - A piece is CAPTURING another piece
+   - A piece is BEING CAPTURED by another piece
 
-### 1. detangle() method - Wrong matching logic
-- **File:** `quantum_chess/quantum/quant.py`
-- **Issue:** Uses exact state matching (`if i == add:`) instead of prefix matching
-- **Reference (Code/Quant.py):** Uses `if i.startswith(add):`
-- **Impact:** When measuring/entanglement, quantum pieces are not properly detangled because states with longer identifiers are not removed
+2. If quantum piece is being captured:
+   - Resolve which instance is the right position
+   - If the captured piece IS the right one: remove other instances, let opponent capture
+   - If the captured piece is NOT the right one: return opponent piece to original square, remove false positions, turn right position to classical piece
 
-### 2. measure() method - Wrong entanglement matching
-- **File:** `quantum_chess/quantum/quant.py`
-- **Issue:** Uses exact state matching (`if final_state == self.ent[i][2]`) instead of prefix matching
-- **Reference (Code/Quant.py):** Uses `if final_state.startswith(self.ent[i][2]):`
-- **Impact:** Entangled pieces are not properly collapsed when measuring
+## Implementation Steps:
 
-### 3. Missing entangling updates in detangle
-- **File:** `quantum_chess/quantum/quant.py`
-- **Issue:** The detangle method doesn't update the entanglement list
-- **Reference (Code/Quant.py):** Has commented code for handling nested entanglement
-- **Impact:** After measurement, stale entanglement references remain
+### Step 1: Update quantum_chess/quantum/quant.py
+- [x] Modify `should_trigger_measurement()` to check if move is a capture
+- [x] Add `should_trigger_measurement_on_being_captured()` method
+- [x] Add `resolve_capture_measurement()` method for handling capture scenarios
 
-## Tasks
+### Step 2: Update quantum_chess/views.py
+- [x] Update make_move to handle measurement outcomes based on capture rules
+- [x] Add logic for when captured piece IS the right one vs NOT the right one
 
-- [ ] 1. Fix `detangle()` method to use prefix matching (startswith)
-- [ ] 2. Fix `measure()` method entanglement detection to use prefix matching
-- [ ] 3. Test the quantum rules to ensure proper entanglement and measurement behavior
+### Step 3: Test the implementation
+- [ ] Verify measurements only trigger on captures
+- [ ] Verify "right piece" case: remove other instances, allow capture
+- [ ] Verify "wrong piece" case: return opponent to original, make right position classical

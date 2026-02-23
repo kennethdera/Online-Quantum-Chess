@@ -59,6 +59,10 @@ def new_game(request):
 def make_move(request):
     """
     API endpoint to make a move in the quantum chess game.
+    Implements measurement rules according to game rules:
+    - Measurements trigger when a square is in superposition of different pieces
+    - Schrödinger's cat: capture without measurement if no conflict
+    - Minimal influence: only resolve specific conflicts
     """
     try:
         data = json.loads(request.body)
@@ -94,6 +98,305 @@ def make_move(request):
         print(f"DEBUG game current_turn: {game_obj.current_turn}")
         print(f"DEBUG legal moves count: {len(list(board.legal_moves))}")
         
+        # Get quantum pieces data and set up quantum game
+        quantum_pieces_data = game_obj.quantum_pieces if game_obj.quantum_pieces else []
+        from_square_name = chess.square_name(from_sq)
+        to_square_name = chess.square_name(to_sq)
+        
+        # Create QuantumGame instance to handle measurement logic
+        quantum_game = QuantumGame()
+        quantum_game.quantum_mode = True
+        
+        # Load existing quantum pieces
+        for qp_data in quantum_pieces_data:
+            qp = QPiece(qp_data.get('position', 'a1'), qp_data.get('piece'))
+            qp.qnum = qp_data.get('qnum', {'0': [qp_data.get('position', 'a1'), 1]})
+            quantum_game.quantum_pieces.append(qp)
+        
+        # Get the piece being moved
+        piece = board.piece_at(from_sq)
+        moved_piece_symbol = piece.symbol() if piece else None
+        moving_piece_color = piece.color if piece else board.turn
+        
+        # === MEASUREMENT DETECTION (Game Rules) ===
+        # Check if this move should trigger a measurement
+        # Measurement ONLY happens during captures
+        is_capture = board.is_capture(chess.Move(from_sq, to_sq))
+        
+        should_measure, conflict_square = quantum_game.should_trigger_measurement(
+            from_square_name, to_square_name, moving_piece_color, is_capture
+        )
+        
+        measurement_result = None
+        
+        if should_measure and conflict_square:
+            print(f"DEBUG: Measurement triggered at {conflict_square} (capture mode)")
+
+            # Collect all positions of quantum pieces at the conflict square BEFORE measurement
+            all_quantum_positions = {}
+            for qp in quantum_game.quantum_pieces:
+                piece_symbol = str(qp.piece)
+                positions = []
+                for state_id, state_data in qp.qnum.items():
+                    if state_data[0] == conflict_square:
+                        # This piece is at the conflict square
+                        # Collect all its positions
+                        for all_state_id, all_state_data in qp.qnum.items():
+                            positions.append(all_state_data[0])
+                        all_quantum_positions[piece_symbol] = positions
+                        break
+
+            # Resolve the measurement according to game rules for captures
+            # This implements: if piece IS the right one -> remove other instances, let capture succeed
+            # If piece is NOT the right one -> return opponent piece to original, make right position classical
+            measurement_result = quantum_game.resolve_capture_measurement(
+                conflict_square, moving_piece_color, is_capturing=True
+            )
+
+            if measurement_result.get('success'):
+                print(f"DEBUG: Measurement resolved - {measurement_result}")
+
+                # Handle different measurement outcomes
+                action = measurement_result.get('action')
+
+                if action == 'capture_succeeds':
+                    # The piece IS at the capture square - remove other instances, let capture proceed
+
+                    # Get the selected piece info from measurement result
+                    selected_piece = measurement_result.get('selected_piece')
+
+                    # Remove pieces from other quantum positions for the selected piece
+                    if selected_piece in all_quantum_positions:
+                        for pos in all_quantum_positions[selected_piece]:
+                            if pos != conflict_square:
+                                other_sq = chess.parse_square(pos)
+                                board.remove_piece_at(other_sq)
+                                print(f"DEBUG: Removed {selected_piece} from {pos} (other quantum position)")
+
+                    # Place the piece at the capture square as classical (since it exists there)
+                    conflict_sq = chess.parse_square(conflict_square)
+                    board.set_piece_at(conflict_sq, chess.Piece.from_symbol(selected_piece))
+                    print(f"DEBUG: Placed {selected_piece} at {conflict_square} as classical piece")
+
+                    # Remove the measured piece from quantum_game.quantum_pieces entirely (becomes classical)
+                    quantum_game.quantum_pieces = [
+                        qp for qp in quantum_game.quantum_pieces
+                        if str(qp.piece) != selected_piece
+                    ]
+                    print(f"DEBUG: Removed {selected_piece} from quantum_game.quantum_pieces (became classical)")
+
+                    # Update quantum pieces data after measurement - this removes other instances
+                    quantum_pieces_data = []
+                    for qp in quantum_game.quantum_pieces:
+                        quantum_pieces_data.append({
+                            'piece': str(qp.piece),
+                            'qnum': qp.qnum,
+                            'entangled': [[str(e[0].piece) if e[0] else None, e[1], e[2]] for e in qp.ent]
+                        })
+                    
+                    # Record measurement in move history
+                    move_count = Move.objects.filter(game=game_obj).count()
+                    Move.objects.create(
+                        game=game_obj,
+                        move_number=move_count // 2 + 1,
+                        is_white_move=moving_piece_color == chess.WHITE,
+                        move_type='measure',
+                        from_square=from_sq,
+                        to_square=to_sq,
+                        promotion=None,
+                        san=f'Measurement at {conflict_square}',
+                        fen_after=board.fen()
+                    )
+                    
+                    # Since measurement already handled the capture, skip the capture processing below
+                    # Set these to None to prevent double-processing
+                    captured_quantum_index = None
+                    captured_quantum_positions = []
+                    
+                    # DO NOT RETURN HERE - Continue to process the capture below
+                    
+                elif action == 'capture_fails_make_classical':
+                    # The piece is NOT at the capture square - this is the "wrong one" case
+                    # According to rules: return opponent piece to original square, 
+                    # remove false positions, turn right position to classical piece
+                    
+                    selected_piece = measurement_result.get('selected_piece')
+                    new_position = measurement_result.get('new_position')
+                    
+                    print(f"DEBUG: Capture failed - piece {selected_piece} is NOT at {conflict_square}")
+                    print(f"DEBUG: Actual position is at {new_position} - converting to classical")
+                    
+                    # First, remove the fake piece from the capture square on the FEN board
+                    # The piece was never actually at the capture square
+                    board = chess.Board(fen=game_obj.fen_position)
+                    conflict_sq = chess.parse_square(conflict_square)
+                    board.remove_piece_at(conflict_sq)
+                    print(f"DEBUG: Removed fake piece from {conflict_square}")
+                    
+                    # Remove the quantum piece from quantum_pieces_data (it becomes classical)
+                    quantum_pieces_data = []
+                    for qp in quantum_game.quantum_pieces:
+                        # Check if this quantum piece has the selected piece type
+                        if str(qp.piece) == selected_piece:
+                            # Check if it has other positions besides the conflict square
+                            has_other_positions = False
+                            for state_id, state_data in qp.qnum.items():
+                                if state_data[0] != conflict_square:
+                                    has_other_positions = True
+                                    break
+                            
+                            if not has_other_positions:
+                                # This is the piece to convert to classical
+                                print(f"DEBUG: Removing quantum piece {selected_piece} from quantum_pieces (becomes classical)")
+                                continue  # Skip adding to quantum_pieces_data - it's now classical
+                        
+                        quantum_pieces_data.append({
+                            'piece': str(qp.piece),
+                            'qnum': qp.qnum,
+                            'entangled': [[str(e[0].piece) if e[0] else None, e[1], e[2]] for e in qp.ent]
+                        })
+                    
+                    # Place the piece as classical at the new position on the board
+                    # This is where the piece actually is (the non-captured position)
+                    if new_position:
+                        new_sq = chess.parse_square(new_position)
+                        board.set_piece_at(new_sq, chess.Piece.from_symbol(selected_piece))
+                        game_obj.fen_position = board.fen()
+                        print(f"DEBUG: Placed classical piece {selected_piece} at {new_position}")
+                    
+                    # IMPORTANT: DO NOT complete the capture - return opponent piece to original square
+                    # The capturing piece stays at its original position, capture fails
+                    # Need to return here without executing the capture move
+                    
+                    # Update game state without making the capture move
+                    game_obj.quantum_pieces = quantum_pieces_data
+                    game_obj.current_turn = not game_obj.current_turn
+                    game_obj.save()
+                    
+                    # Record measurement in move history
+                    move_count = Move.objects.filter(game=game_obj).count()
+                    Move.objects.create(
+                        game=game_obj,
+                        move_number=move_count // 2 + 1,
+                        is_white_move=moving_piece_color == chess.WHITE,
+                        move_type='measure',
+                        from_square=from_sq,
+                        to_square=to_sq,
+                        promotion=None,
+                        san=f'Measurement: {selected_piece} not at {conflict_square}, at {new_position}',
+                        fen_after=game_obj.fen_position
+                    )
+                    
+                    return JsonResponse({
+                        'success': True,
+                        'fen': game_obj.fen_position,
+                        'message': f'Capture failed! {selected_piece} was not at {conflict_square}. Found at {new_position}.',
+                        'turn': 'white' if game_obj.current_turn else 'black',
+                        'quantum_pieces': quantum_pieces_data,
+                        'measurement': {
+                            'action': 'capture_fails_make_classical',
+                            'selected_piece': selected_piece,
+                            'capture_square': conflict_square,
+                            'actual_position': new_position
+                        }
+                    })
+                elif action == 'capture_fails_no_position':
+                    # The piece doesn't exist at all - just remove from quantum pieces
+                    # The capture also fails (no piece to capture)
+                    
+                    selected_piece = measurement_result.get('selected_piece')
+                    
+                    print(f"DEBUG: Capture failed - {selected_piece} does NOT exist at {conflict_square}")
+                    
+                    # Remove all quantum pieces at this square
+                    quantum_pieces_data = []
+                    for qp in quantum_game.quantum_pieces:
+                        # Check if this quantum piece is at the capture square
+                        is_at_capture_square = False
+                        for state_id, state_data in qp.qnum.items():
+                            if state_data[0] == conflict_square:
+                                is_at_capture_square = True
+                                break
+                        
+                        if not is_at_capture_square:
+                            # Keep this quantum piece
+                            quantum_pieces_data.append({
+                                'piece': str(qp.piece),
+                                'qnum': qp.qnum,
+                                'entangled': [[str(e[0].piece) if e[0] else None, e[1], e[2]] for e in qp.ent]
+                            })
+                        # Skip adding the piece at capture square - it doesn't exist
+                    
+                    # IMPORTANT: DO NOT complete the capture - return opponent piece to original square
+                    # We need to return here without executing the capture move
+                    
+                    # Update game state without making the capture move
+                    game_obj.quantum_pieces = quantum_pieces_data
+                    game_obj.current_turn = not game_obj.current_turn
+                    game_obj.save()
+                    
+                    # Record measurement in move history
+                    move_count = Move.objects.filter(game=game_obj).count()
+                    Move.objects.create(
+                        game=game_obj,
+                        move_number=move_count // 2 + 1,
+                        is_white_move=moving_piece_color == chess.WHITE,
+                        move_type='measure',
+                        from_square=from_sq,
+                        to_square=to_sq,
+                        promotion=None,
+                        san=f'Measurement: {selected_piece} does not exist at {conflict_square}',
+                        fen_after=game_obj.fen_position
+                    )
+                    
+                    return JsonResponse({
+                        'success': True,
+                        'fen': game_obj.fen_position,
+                        'message': f'Capture failed! {selected_piece} does not exist at {conflict_square}.',
+                        'turn': 'white' if game_obj.current_turn else 'black',
+                        'quantum_pieces': quantum_pieces_data,
+                        'measurement': {
+                            'action': 'capture_fails_no_position',
+                            'selected_piece': selected_piece,
+                            'capture_square': conflict_square
+                        }
+                    })
+                
+                # Record measurement in move history
+                move_count = Move.objects.filter(game=game_obj).count()
+                Move.objects.create(
+                    game=game_obj,
+                    move_number=move_count // 2 + 1,
+                    is_white_move=moving_piece_color == chess.WHITE,
+                    move_type='measure',
+                    from_square=from_sq,
+                    to_square=to_sq,
+                    promotion=None,
+                    san=f'Measurement at {conflict_square}',
+                    fen_after=game_obj.fen_position
+                )
+                
+                game_obj.quantum_pieces = quantum_pieces_data
+                game_obj.save()
+                
+                # Return measurement result - the move may need to be reattempted
+                # or may have different outcomes based on measurement
+                # For capture_succeeds, continue to normal flow - don't return here
+                # The capture will be processed below
+        
+        # === SCHRÖDINGER'S CAT CHECK ===
+        # Check if this is a capture of a quantum piece without conflict
+        is_capture = board.is_capture(chess.Move(from_sq, to_sq))
+        is_schrodinger = False
+        captured_qp = None
+        
+        if is_capture:
+            is_schrodinger, captured_qp = quantum_game.check_schrodinger_capture(
+                from_square_name, to_square_name, moving_piece_color
+            )
+            if is_schrodinger:
+                print(f"DEBUG: Schrödinger's cat capture - no measurement needed")
+        
         # Create move
         move = chess.Move(from_sq, to_sq)
         if promotion:
@@ -111,16 +414,6 @@ def make_move(request):
                     'requested_move': f"{from_square}->{to_square}",
                 }
             }, status=400)
-
-        
-        # Get quantum pieces data
-        quantum_pieces_data = game_obj.quantum_pieces if game_obj.quantum_pieces else []
-        from_square_name = chess.square_name(from_sq)
-        to_square_name = chess.square_name(to_sq)
-        
-        # Get the piece being moved
-        piece = board.piece_at(from_sq)
-        moved_piece_symbol = piece.symbol() if piece else None
 
         
         # Check if we're capturing a quantum piece at the destination
@@ -160,37 +453,67 @@ def make_move(request):
         san = board.san(move)
         board.push(move)
         
-        # If we captured a quantum piece, the capture reveals its actual position
-        # So the piece collapses to 100% at the captured position, other positions are removed
+        # === HANDLE CAPTURES ACCORDING TO GAME RULES ===
+        
+        # If we captured a quantum piece, handle based on whether it was Schrödinger's cat
         if captured_quantum_index is not None and captured_quantum_positions:
             print(f"DEBUG: Capturing quantum piece at {to_square_name}")
             print(f"DEBUG: Quantum piece was at positions: {captured_quantum_positions}")
             
-            # Remove piece from the board at capture position
-            board.remove_piece_at(to_sq)
-            print(f"DEBUG: Removed piece from capture position {to_square_name}")
-            
-            # Capturing a quantum piece "measures" it - we now know it was at the captured position
-            # So collapse to 100% at the captured position, remove all other positions
-            # The piece becomes a classical piece at the capture destination
-            
-            # Get the piece type from quantum piece data
-            captured_piece_type = quantum_pieces_data[captured_quantum_index].get('piece')
-            
-            # Remove the quantum piece from quantum_pieces_data (it becomes classical)
-            quantum_pieces_data.pop(captured_quantum_index)
-            print(f"DEBUG: Removed quantum piece from data list (collapsed to captured position)")
-            
-            # Place the captured piece as a classical piece at the destination
-            if captured_piece_type:
-                board.set_piece_at(to_sq, chess.Piece.from_symbol(captured_piece_type))
-                print(f"DEBUG: Placed captured piece {captured_piece_type} at {to_square_name} as classical piece")
-            
-            # Also place the capturing piece if there is one
-            if moved_piece_symbol:
-                # The capturing piece goes to the captured position
-                board.set_piece_at(to_sq, chess.Piece.from_symbol(moved_piece_symbol))
-                print(f"DEBUG: Placed capturing piece {moved_piece_symbol} at {to_square_name}")
+            if is_schrodinger:
+                # Schrödinger's cat: capture "half" the quantum piece
+                # The piece remains in superposition but loses this state
+                print(f"DEBUG: Schrödinger's cat capture - removing captured state only")
+                
+                # Remove only the captured state from the quantum piece
+                qp_data = quantum_pieces_data[captured_quantum_index]
+                states_to_remove = []
+                for state_id, state_data in list(qp_data.get('qnum', {}).items()):
+                    if state_data[0] == to_square_name:
+                        states_to_remove.append(state_id)
+                
+                for state_id in states_to_remove:
+                    del qp_data['qnum'][state_id]
+                
+                # Renormalize probabilities
+                remaining_prob = sum(s[1] for s in qp_data['qnum'].values())
+                if remaining_prob > 0:
+                    for state_data in qp_data['qnum'].values():
+                        state_data[1] /= remaining_prob
+                
+                # The piece is now "half-dead" - in superposition of existing and not existing
+                # Game continues with the piece in reduced superposition
+                
+            else:
+                # Regular capture or post-measurement capture
+                # The quantum piece collapses to the captured position
+                print(f"DEBUG: Regular capture - collapsing quantum piece")
+                
+                # Remove piece from the board at capture position
+                board.remove_piece_at(to_sq)
+                print(f"DEBUG: Removed piece from capture position {to_square_name}")
+                
+                # Capturing a quantum piece "measures" it - we now know it was at the captured position
+                # So collapse to 100% at the captured position, remove all other positions
+                # The piece becomes a classical piece at the capture destination
+                
+                # Get the piece type from quantum piece data
+                captured_piece_type = quantum_pieces_data[captured_quantum_index].get('piece')
+                
+                # Remove the quantum piece from quantum_pieces_data (it becomes classical)
+                quantum_pieces_data.pop(captured_quantum_index)
+                print(f"DEBUG: Removed quantum piece from data list (collapsed to captured position)")
+                
+                # Place the captured piece as a classical piece at the destination
+                if captured_piece_type:
+                    board.set_piece_at(to_sq, chess.Piece.from_symbol(captured_piece_type))
+                    print(f"DEBUG: Placed captured piece {captured_piece_type} at {to_square_name} as classical piece")
+                
+                # Also place the capturing piece if there is one
+                if moved_piece_symbol:
+                    # The capturing piece goes to the captured position
+                    board.set_piece_at(to_sq, chess.Piece.from_symbol(moved_piece_symbol))
+                    print(f"DEBUG: Placed capturing piece {moved_piece_symbol} at {to_square_name}")
         
         # If this was a quantum piece being moved, collapse its other superpositions
         if moving_quantum_index is not None and moving_quantum_other_positions:
@@ -214,6 +537,7 @@ def make_move(request):
                 
                 # Remove entanglement since piece is now measured/collapsed
                 quantum_pieces_data[adjusted_index]['entangled'] = []
+
         
         # Update game status based on board state
         if board.is_checkmate():

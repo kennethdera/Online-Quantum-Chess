@@ -374,10 +374,361 @@ class QuantumGame:
             qp, state = result
             return qp.measure()
         return None
+    
+    def detect_conflicts(self) -> Dict[str, List[Tuple['QuantumPiece', str, float]]]:
+        """
+        Detect squares that have conflicts - squares occupied by different pieces
+        in superposition (triggering measurement according to game rules).
+        
+        Returns:
+            Dictionary mapping square names to list of (piece, state_id, probability)
+        """
+        # Get all positions and which pieces occupy them
+        square_occupants: Dict[str, List[Tuple['QuantumPiece', str, float]]] = {}
+        
+        for qp in self.quantum_pieces:
+            for state_id, state_data in qp.qnum.items():
+                pos = state_data[0]
+                prob = state_data[1]
+                if pos not in square_occupants:
+                    square_occupants[pos] = []
+                square_occupants[pos].append((qp, state_id, prob))
+        
+        # Find conflicts: squares with multiple DIFFERENT pieces
+        conflicts = {}
+        for square, occupants in square_occupants.items():
+            if len(occupants) > 1:
+                # Check if they are different pieces (not just different states of same piece)
+                different_pieces = []
+                seen_pieces = set()
+                for qp, state_id, prob in occupants:
+                    piece_id = id(qp)
+                    if piece_id not in seen_pieces:
+                        seen_pieces.add(piece_id)
+                        different_pieces.append((qp, state_id, prob))
+                
+                if len(different_pieces) > 1:
+                    conflicts[square] = different_pieces
+        
+        return conflicts
+    
+    def should_trigger_measurement(self, from_square: str, to_square: str, 
+                                   moving_piece_color: bool, is_capture: bool = False) -> Tuple[bool, Optional[str]]:
+        """
+        Check if a move should trigger a measurement according to game rules.
+        
+        A measurement is ONLY triggered when:
+        1. A piece is CAPTURING another piece (destination has a quantum piece in superposition)
+        2. A piece is BEING CAPTURED (source had a quantum piece that's being captured)
+        
+        Args:
+            from_square: Source square of the move
+            to_square: Destination square of the move
+            moving_piece_color: True for white, False for black
+            is_capture: Whether this is a capture move
+        
+        Returns:
+            Tuple of (should_measure, conflict_square)
+        """
+        # Measurement can ONLY happen during a capture
+        if not is_capture:
+            return False, None
+        
+        # Check if the destination square has a quantum piece that could be captured
+        # This is case 1: The moving piece is CAPTURING a quantum piece
+        for qp in self.quantum_pieces:
+            for state_id, state_data in qp.qnum.items():
+                if state_data[0] == to_square:
+                    # Found a quantum piece at the destination - this is a capture of a quantum piece
+                    # Need to measure to determine if the capture succeeds
+                    return True, to_square
+        
+        # Check if the source square has a quantum piece that is being "captured"
+        # This is case 2: The piece at source is being captured (by being moved away)
+        # Actually, this case is when moving FROM a square that has a quantum piece
+        # and another piece is also there - but since we check is_capture, we need
+        # to check if this is the destination piece being captured
+        
+        return False, None
+    
+    def should_trigger_measurement_on_being_captured(self, from_square: str, to_square: str,
+                                                      moving_piece_color: bool) -> Tuple[bool, Optional[str]]:
+        """
+        Check if a quantum piece at from_square is being "captured" by the move.
+        
+        This happens when:
+        - A quantum piece exists at from_square in superposition
+        - Another piece (classical or quantum) also exists at from_square
+        - This creates a conflict that needs measurement
+        
+        Args:
+            from_square: Source square of the move
+            to_square: Destination square of the move
+            moving_piece_color: Color of the moving piece
+        
+        Returns:
+            Tuple of (should_measure, conflict_square)
+        """
+        conflicts = self.detect_conflicts()
+        
+        # Check if source square has a conflict (multiple pieces there)
+        if from_square in conflicts:
+            return True, from_square
+        
+        return False, None
+    
+    def resolve_capture_measurement(self, capture_square: str, capturing_piece_color: bool,
+                                    is_capturing: bool = True) -> Dict[str, any]:
+        """
+        Resolve measurement for a capture scenario according to game rules.
+        
+        Rules:
+        - If quantum piece IS the right one: remove other instances, let opponent capture
+        - If quantum piece is NOT the right one: return opponent piece to original square,
+          remove false positions, turn right position to classical piece
+        
+        Args:
+            capture_square: The square where capture is attempted
+            capturing_piece_color: Color of the piece making the capture
+            is_capturing: True if the quantum piece is being captured (moving piece captures it)
+                          False if the moving piece IS the quantum piece being captured
+        
+        Returns:
+            Dictionary with measurement results and action to take
+        """
+        # Find all quantum pieces at the capture square
+        pieces_at_square = []
+        for qp in self.quantum_pieces:
+            for state_id, state_data in qp.qnum.items():
+                if state_data[0] == capture_square:
+                    pieces_at_square.append((qp, state_id, state_data[1]))
+        
+        if not pieces_at_square:
+            return {'success': False, 'error': 'No quantum pieces at capture square'}
+        
+        # If there's only one piece at the square, measure it
+        if len(pieces_at_square) == 1:
+            qp, state_id, prob = pieces_at_square[0]
+            
+            # Randomly determine if piece exists at this square
+            rand = random.random()
+            piece_exists = rand < prob
+            
+            if piece_exists:
+                # The piece IS at the capture square - "right one" case
+                # Remove other instances, keep this one
+                states_to_remove = [sid for sid in qp.qnum.keys() if sid != state_id]
+                for sid in states_to_remove:
+                    del qp.qnum[sid]
+                
+                # Set to 100% probability
+                qp.qnum[state_id][1] = 1.0
+                
+                return {
+                    'success': True,
+                    'action': 'capture_succeeds',
+                    'selected_piece': str(qp.piece),
+                    'capture_square': capture_square,
+                    'outcome': 'piece_exists_at_square'
+                }
+            else:
+                # The piece is NOT at the capture square - "wrong one" case
+                # Remove this state, keep other positions
+                del qp.qnum[state_id]
+                
+                # Renormalize probabilities
+                remaining_prob = sum(s[1] for s in qp.qnum.values())
+                if remaining_prob > 0:
+                    for s in qp.qnum.values():
+                        s[1] /= remaining_prob
+                
+                # Turn the piece into a classical piece at the correct position
+                # Find another position that has probability
+                other_positions = [(sid, data) for sid, data in qp.qnum.items() if data[1] > 0]
+                if other_positions:
+                    # Keep only the first remaining position as classical
+                    correct_state_id, correct_data = other_positions[0]
+                    final_position = correct_data[0]
+                    
+                    # Remove all other states
+                    states_to_remove = [sid for sid in qp.qnum.keys() if sid != correct_state_id]
+                    for sid in states_to_remove:
+                        del qp.qnum[sid]
+                    
+                    # Set to classical (100% probability)
+                    qp.qnum = {correct_state_id: [final_position, 1.0]}
+                    
+                    return {
+                        'success': True,
+                        'action': 'capture_fails_make_classical',
+                        'selected_piece': str(qp.piece),
+                        'new_position': final_position,
+                        'outcome': ''
+                    }
+                
+                return {
+                    'success': True,
+                    'action': 'capture_fails_no_position',
+                    'selected_piece': str(qp.piece),
+                    'outcome': 'piece_does_not_exist'
+                }
+        
+        # Multiple pieces at square - need to resolve which one is there
+        # This is a conflict situation
+        total_prob = sum(prob for _, _, prob in pieces_at_square)
+        normalized_probs = [prob / total_prob for _, _, prob in pieces_at_square]
+        
+        rand = random.random()
+        cumulative = 0
+        selected_idx = 0
+        
+        for i, prob in enumerate(normalized_probs):
+            cumulative += prob
+            if rand <= cumulative:
+                selected_idx = i
+                break
+        
+        selected_qp, selected_state, selected_prob = pieces_at_square[selected_idx]
+        
+        # Collapse to the selected piece
+        states_to_remove = [sid for sid in selected_qp.qnum.keys() if sid != selected_state]
+        for sid in states_to_remove:
+            del selected_qp.qnum[sid]
+        selected_qp.qnum[selected_state][1] = 1.0
+        
+        return {
+            'success': True,
+            'action': 'capture_succeeds',
+            'selected_piece': str(selected_qp.piece),
+            'capture_square': capture_square,
+            'outcome': 'piece_determined'
+        }
+    
+    def resolve_measurement(self, conflict_square: str) -> Dict[str, any]:
+        """
+        Resolve a measurement at a conflict square following the minimal influence principle.
+        Only resolves the specific conflict, leaving other superpositions untouched.
+        
+        Args:
+            conflict_square: The square where measurement occurs
+        
+        Returns:
+            Dictionary with measurement results
+        """
+        conflicts = self.detect_conflicts()
+        
+        if conflict_square not in conflicts:
+            return {'success': False, 'error': 'No conflict at this square'}
+        
+        occupants = conflicts[conflict_square]
+        measurement_results = []
+        
+        # Randomly select which piece occupies the square based on probabilities
+        total_prob = sum(prob for _, _, prob in occupants)
+        if total_prob == 0:
+            return {'success': False, 'error': 'Zero total probability'}
+        
+        # Normalize probabilities
+        normalized_probs = [prob / total_prob for _, _, prob in occupants]
+        
+        # Random selection
+        rand = random.random()
+        cumulative = 0
+        selected_idx = 0
+        
+        for i, prob in enumerate(normalized_probs):
+            cumulative += prob
+            if rand <= cumulative:
+                selected_idx = i
+                break
+        
+        selected_qp, selected_state, selected_prob = occupants[selected_idx]
+        
+        # Collapse the selected piece to the conflict square
+        # Remove other states of the selected piece (minimal influence on this piece)
+        states_to_remove = []
+        for state_id in list(selected_qp.qnum.keys()):
+            if state_id != selected_state:
+                states_to_remove.append(state_id)
+        
+        for state_id in states_to_remove:
+            del selected_qp.qnum[state_id]
+        
+        # Set the selected state to 100% probability
+        selected_qp.qnum[selected_state][1] = 1.0
+        
+        # For other pieces at this square, they are "not here" - collapse them elsewhere
+        for i, (qp, state_id, prob) in enumerate(occupants):
+            if i != selected_idx:
+                # This piece is NOT at the conflict square
+                # Remove this state from the piece
+                if state_id in qp.qnum:
+                    del qp.qnum[state_id]
+                
+                # Renormalize remaining probabilities
+                remaining_prob = sum(s[1] for s in qp.qnum.values())
+                if remaining_prob > 0:
+                    for s in qp.qnum.values():
+                        s[1] /= remaining_prob
+        
+        # Record measurement result
+        measurement_results.append({
+            'square': conflict_square,
+            'selected_piece': str(selected_qp.piece),
+            'probability': selected_prob,
+            'outcome': 'exists_at_square' if selected_qp.qnum[selected_state][0] == conflict_square else 'not_at_square'
+        })
+        
+        return {
+            'success': True,
+            'conflict_square': conflict_square,
+            'results': measurement_results,
+            'selected_piece': str(selected_qp.piece)
+        }
+    
+    def check_schrodinger_capture(self, from_square: str, to_square: str,
+                                   moving_piece_color: bool) -> Tuple[bool, Optional['QuantumPiece']]:
+        """
+        Check if a capture is a Schrödinger's cat scenario (no measurement needed).
+        
+        Schrödinger's cat: Capturing a superposed piece doesn't trigger measurement
+        if the target square is only occupied by that one piece (no conflict).
+        
+        Args:
+            from_square: Source square
+            to_square: Target square (capture destination)
+            moving_piece_color: Color of capturing piece
+        
+        Returns:
+            Tuple of (is_schrodinger, captured_quantum_piece)
+        """
+        # Check if target square has a quantum piece
+        target_occupant = None
+        for qp in self.quantum_pieces:
+            for state_id, state_data in qp.qnum.items():
+                if state_data[0] == to_square:
+                    target_occupant = qp
+                    break
+            if target_occupant:
+                break
+        
+        if not target_occupant:
+            return False, None  # No quantum piece to capture
+        
+        # Check if this is the ONLY piece at to_square (Schrödinger's cat scenario)
+        conflicts = self.detect_conflicts()
+        
+        if to_square not in conflicts:
+            # No conflict - this is Schrödinger's cat!
+            # The capture happens without measurement
+            return True, target_occupant
+        
+        return False, target_occupant  # There's a conflict, measurement needed
 
 
 
 def create_quantum_piece(position: str, piece: Any) -> QuantumPiece:
+
     """
     Factory function to create a quantum piece.
     """

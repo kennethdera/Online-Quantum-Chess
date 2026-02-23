@@ -40,8 +40,11 @@ class Game(models.Model):
     quantum_mode = models.BooleanField(default=False)
     move_history = models.JSONField(default=list)
     quantum_pieces = models.JSONField(default=list)
+    measurement_history = models.JSONField(default=list)  # Track measurement events
+    pending_measurement = models.JSONField(default=dict, null=True, blank=True)  # Deferred moves
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
     
     class Meta:
         ordering = ['-created_at']
