@@ -133,5 +133,17 @@
     {% block extra_js %}{% endblock %}
     {% load sweetify %}
     {% sweetify %}
+     {% for message in messages %}
+  <script src="//cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  {% if message.tags == 'success' %}
+  <script>
+  Swal.fire(
+  'good',
+  '{{message}}',
+  'success'
+  )
+  </script>
+  {% endif %}
+ {% endfor %}
 </body>
 </html>
