@@ -56,7 +56,15 @@
         padding: 10px;
         margin-top: 10px;
     }
+    
+    /* Quantum split square border */
+    .quantum-split-square {
+        border: 3px solid #9d4edd !important;
+        box-shadow: inset 0 0 10px rgba(157, 78, 221, 0.5) !important;
+        box-sizing: border-box;
+    }
 </style>
+
 {% endblock %}
 
 {% block content %}
@@ -180,34 +188,97 @@
         firstTarget: null
     };
     
+    // Helper function to determine alert type based on message content
+    function getAlertConfig(message) {
+        var lowerMsg = message.toLowerCase();
+        
+        // Error/failure patterns
+        if (lowerMsg.includes('failed') || lowerMsg.includes('error') || lowerMsg.includes('illegal') || lowerMsg.includes('invalid')) {
+            return {
+                icon: 'error',
+                title: 'Error',
+                confirmButtonColor: '#dc3545'
+            };
+        }
+        
+        // Success patterns
+        if (lowerMsg.includes('success') || lowerMsg.includes('completed') || lowerMsg.includes('saved') || lowerMsg.includes('captured')) {
+            return {
+                icon: 'success',
+                title: 'Success',
+                confirmButtonColor: '#28a745'
+            };
+        }
+        
+        // Warning patterns
+        if (lowerMsg.includes('warning') || lowerMsg.includes('instance') || lowerMsg.includes('fake')) {
+            return {
+                icon: 'warning',
+                title: 'Quantum Event',
+                confirmButtonColor: '#ffc107'
+            };
+        }
+        
+        // Quantum-specific patterns
+        if (lowerMsg.includes('quantum') || lowerMsg.includes('measurement') || lowerMsg.includes('measured') || lowerMsg.includes('collapse')) {
+            return {
+                icon: 'info',
+                title: 'Quantum Measurement',
+                confirmButtonColor: '#9d4edd'
+            };
+        }
+        
+        // Default info
+        return {
+            icon: 'info',
+            title: 'Game Info',
+            confirmButtonColor: '#0d6efd'
+        };
+    }
+    
+    // Enhanced function to show debug messages as styled SweetAlert modals
+    function showDebugMessage(message, delay) {
+        setTimeout(function() {
+            var config = getAlertConfig(message);
+            
+            Swal.fire({
+                title: config.title,
+                text: message,
+                icon: config.icon,
+                confirmButtonColor: config.confirmButtonColor,
+                confirmButtonText: 'OK',
+                background: 'rgba(26, 26, 46, 0.95)',
+                color: '#fff',
+                customClass: {
+                    popup: 'quantum-swal-popup',
+                    title: 'quantum-swal-title',
+                    content: 'quantum-swal-content'
+                },
+                showClass: {
+                    popup: 'animate__animated animate__fadeInDown'
+                },
+                hideClass: {
+                    popup: 'animate__animated animate__fadeOutUp'
+                },
+                timer: 4000,
+                timerProgressBar: true
+            });
+        }, delay);
+    }
+    
+    // Show multiple debug messages as a sequence of modals
+    function showDebugMessages(messages) {
+        if (!messages || messages.length === 0) return;
+        
+        messages.forEach(function(msg, index) {
+            showDebugMessage(msg, index * 500);
+        });
+    }
+    
     // Initialize board
     function onDragStart (source, piece, position, orientation) {
         // Do not pick up pieces if the game is over
         if (game.game_over()) return false;
-
-        // Check if there's a quantum piece at this position
-        var isQuantumPiece = false;
-        var quantumPieceSymbol = null;
-        
-        if (quantumPieces && quantumPieces.length > 0) {
-            for (var i = 0; i < quantumPieces.length; i++) {
-                var qp = quantumPieces[i];
-                for (var state in qp.qnum) {
-                    if (qp.qnum[state][0] === source) {
-                        isQuantumPiece = true;
-                        quantumPieceSymbol = qp.piece;
-                        break;
-                    }
-                }
-                if (isQuantumPiece) break;
-            }
-        }
-        
-        // Allow dragging quantum pieces
-        if (isQuantumPiece) {
-            console.log('Dragging quantum piece at', source);
-            return true;
-        }
 
         // Only pick up pieces for the side to move
         if ((game.turn() === 'w' && piece.search(/^b/) !== -1) ||
@@ -228,71 +299,6 @@
             return 'snapback';
         }
         
-        // Check if source has a quantum piece (not on classical board)
-        var isQuantumSource = false;
-        var isQuantumTarget = false;
-        var quantumPieceSymbol = null;
-        
-        if (quantumPieces && quantumPieces.length > 0) {
-            for (var i = 0; i < quantumPieces.length; i++) {
-                var qp = quantumPieces[i];
-                for (var state in qp.qnum) {
-                    if (qp.qnum[state][0] === source) {
-                        isQuantumSource = true;
-                        quantumPieceSymbol = qp.piece;
-                        break;
-                    }
-                }
-                if (isQuantumSource) break;
-            }
-        }
-        
-        // Handle quantum piece move
-        if (isQuantumSource) {
-            console.log('Moving quantum piece from', source, 'to', target);
-            
-            // Send move to server - backend handles quantum measurement
-            var moveData = {
-                game_id: gameId,
-                from_square: source,
-                to_square: target,
-                quantum_mode: true
-            };
-            
-            $.ajax({
-                url: '{% url "quantum_chess:make_move" %}',
-                method: 'POST',
-                contentType: 'application/json',
-                data: JSON.stringify(moveData),
-                headers: {
-                    'X-CSRFToken': '{{ csrf_token }}'
-                },
-                success: function(response) {
-                    console.log('Quantum move saved:', response);
-                    if (response.fen) {
-                        game.load(response.fen);
-                        board.position(response.fen);
-                        $('#gameFen').text(response.fen);
-                    }
-                    // Update quantum pieces from response
-                    if (response.quantum_pieces) {
-                        quantumPieces = response.quantum_pieces;
-                        updateQuantumPiecesDisplay();
-                        renderQuantumPiecesOnBoard();
-                    }
-                    loadGameState();
-                },
-                error: function(error) {
-                    console.error('Error saving quantum move:', error);
-                    console.error('Error response:', error.responseText);
-                }
-            });
-            
-            // Don't let chess.js handle this - just update visually after server response
-            return 'snapback';
-        }
-        
-        // Normal classical move
         // Check if this is a promotion move (pawn reaching last rank)
         var piece = game.get(source);
         var isPromotion = piece && piece.type === 'p' && (target[1] === '8' || target[1] === '1');
@@ -311,7 +317,7 @@
         // Illegal move
         if (move === null) return 'snapback';
 
-        updateStatus();
+        // Don't call updateStatus() here - it will be updated after server response
         updateBoard();
         
         // Send move to server
@@ -336,12 +342,26 @@
             },
             success: function(response) {
                 console.log('Move saved:', response);
+                
+                // Display debug messages as enhanced SweetAlert modals
+                if (response.debug_messages && response.debug_messages.length > 0) {
+                    showDebugMessages(response.debug_messages);
+                }
+                
                 if (response.fen) {
                     game.load(response.fen);
                     board.position(response.fen);
-                    // Update FEN display
                     $('#gameFen').text(response.fen);
                 }
+                
+                // Update turn display from server response immediately - this ensures
+                // the correct turn is shown even before loadGameState completes
+                if (response.turn) {
+                    var turnText = response.turn === 'white' ? "White's Turn" : "Black's Turn";
+                    $('.game-status').text(turnText);
+                    console.log('Updated turn to:', turnText, 'from server response');
+                }
+                
                 // Update move history after successful move
                 loadGameState();
             },
@@ -409,12 +429,18 @@
             },
             success: function(response) {
                 console.log('Quantum split performed:', response);
+                
+                // Display debug messages as enhanced SweetAlert modals
+                if (response.debug_messages && response.debug_messages.length > 0) {
+                    showDebugMessages(response.debug_messages);
+                }
+                
                 console.log('Server turn:', response.turn, 'Current game turn:', game.turn());
                 
                 if (response.fen) {
                     // Load the new position - this updates game.turn() and board
                     game.load(response.fen);
-                    // Update the chessboard.js board
+                    // Update the visual chessboard.js board - this is REQUIRED for showing pieces
                     board.position(response.fen);
                     console.log('After loading FEN, game turn is now:', game.turn());
                     // Update FEN display
@@ -424,8 +450,10 @@
                 if (response.quantum_pieces) {
                     quantumPieces = response.quantum_pieces;
                     updateQuantumPiecesDisplay();
-                    // Delay rendering to ensure board is ready
-                    setTimeout(renderQuantumPiecesOnBoard, 100);
+                    // Clear any existing quantum ghost pieces and re-render
+                    $('#board .quantum-ghost').remove();
+                    // Small delay to ensure board DOM is ready
+                    setTimeout(renderQuantumPiecesOnBoard, 50);
                 }
                 // Update turn display from server
                 if (response.turn) {
@@ -446,8 +474,6 @@
                 loadGameState();
                 // Don't call updateStatus() here - it would overwrite our turn display
             },
-
-
 
 
 
@@ -484,7 +510,10 @@
         $('#board [class*="square-"]').css('background', '');
         // Also remove any highlight classes if they exist
         $('#board .square-55d, #board .square-55l').css('background', '');
+        // Remove quantum split square borders
+        $('#board .quantum-split-square').removeClass('quantum-split-square');
     }
+
 
     
     function updateBoard() {
@@ -577,63 +606,75 @@
     }
     
     // Render quantum pieces on the board as ghost pieces
-    // Render quantum pieces on the board - add piece images and dashed border to squares with quantum pieces
     function renderQuantumPiecesOnBoard() {
-        // Clear any existing quantum styling and pieces
-        $('#board [class*="square-"]').css('box-shadow', '');
-        $('#board [class*="square-"]').removeClass('quantum-marked');
-        // Remove any existing quantum piece images
-        $('#board .piece-image').remove();
+        // Clear any existing quantum piece indicators
+        $('#board .quantum-ghost').remove();
         
         if (!quantumPieces || quantumPieces.length === 0) return;
         
-        console.log('Rendering quantum pieces, count:', quantumPieces.length);
+        var pieceTheme = 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png';
         
-        // Render quantum pieces at their superposition positions
+        // Debug: log board structure
+        console.log('Board element:', $('#board')[0]);
+        console.log('Board children count:', $('#board').children().length);
+        
         quantumPieces.forEach(function(qp) {
-            var pieceSymbol = qp.piece;
-            var pieceImageName = getPieceImageName(pieceSymbol);
-            
-            console.log('Quantum piece:', pieceSymbol, '-> Image:', pieceImageName);
-            
             for (var state in qp.qnum) {
                 var pos = qp.qnum[state][0];
+                var prob = qp.qnum[state][1];
+                var piece = qp.piece;
                 
-                console.log('Rendering quantum piece at:', pos);
+                // Convert piece to chessboard.js format (e.g., 'P' -> 'wP', 'p' -> 'bP')
+                var pieceImage = getPieceImageName(piece);
+                if (!pieceImage) {
+                    console.log('Invalid piece symbol:', piece);
+                    continue;
+                }
                 
-                // Find the square
-                var $square = $('#board .square-' + pos);
+                // chessboard.js creates elements with class pattern like "square-a1"
+                // Try to find by looking for elements with the square class
+                var $square = $('#board').find('[class*="square-' + pos + '"]');
                 
                 if ($square.length === 0) {
-                    // Try alternative lookup
-                    $square = $('#board [class*="square-' + pos + '"]');
+                    console.log('Could not find square for quantum piece:', pos);
+                    // Log all available square classes for debugging
+                    var allSquares = $('#board [class*="square-"]').map(function() { 
+                        return $(this).attr('class'); 
+                    }).get();
+                    console.log('Available square classes:', allSquares.slice(0, 10), '...');
+                    continue;
                 }
                 
-                if ($square.length > 0) {
-                    // Add the piece image to the square
-                    var pieceUrl = 'https://chessboardjs.com/img/chesspieces/wikipedia/' + pieceImageName + '.png';
-                    
-                    // Remove any existing piece at this position first
-                    $square.find('img').remove();
-                    
-                    // Add the piece image
-                    $square.append('<img src="' + pieceUrl + '" class="piece-image" style="width:100%;height:100%;position:absolute;top:0;left:0;pointer-events:none;" />');
-                    
-                    // Add dashed border to indicate quantum piece
-                    $square.css('box-shadow', 'inset 0 0 0 3px #f093fb');
-                    $square.addClass('quantum-marked');
-                    console.log('Added quantum piece at', pos);
-                }
+                console.log('Rendering quantum piece at:', pos, 'piece:', piece, 'image:', pieceImage, 'prob:', prob);
+                // Create ghost piece image
+                var $ghost = $('<img>')
+                    .addClass('quantum-ghost')
+                    .attr('src', pieceTheme.replace('{piece}', pieceImage))
+                    .css({
+                        'position': 'absolute',
+                        'width': '50%',
+                        'height': '50%',
+                        'opacity': prob,
+                        'pointer-events': 'none',
+                        'z-index': 100,
+                        'top': '25%',
+                        'left': '25%'
+                    });
+                
+                // Position the ghost piece
+                $square.css('position', 'relative');
+                $square.append($ghost);
+                
+                // Add border to the square to indicate quantum split
+                $square.addClass('quantum-split-square');
             }
         });
-        
-        console.log('Quantum rendering complete');
     }
 
 
 
 
-
+    
     
     function loadGameState() {
         $.ajax({
@@ -811,10 +852,26 @@
 
 
 
-
-
         
         updateStatus();
     });
 </script>
+
+<!-- Custom styles for SweetAlert quantum theme -->
+<style>
+    .quantum-swal-popup {
+        border-radius: 15px !important;
+        border: 2px solid #9d4edd !important;
+        box-shadow: 0 0 30px rgba(157, 78, 221, 0.5) !important;
+    }
+    .quantum-swal-title {
+        color: #9d4edd !important;
+        font-weight: bold !important;
+    }
+    @keyframes fadeInDown {
+        from { opacity: 0; transform: translate3d(0, -20px, 0); }
+        to { opacity: 1; transform: translate3d(0, 0, 0); }
+    }
+    .animate__fadeInDown { animation: fadeInDown 0.3s ease-out; }
+</style>
 {% endblock %}

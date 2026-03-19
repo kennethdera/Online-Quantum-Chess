@@ -10,7 +10,6 @@
     
     <!-- Chessboard.js CSS -->
     <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
-    
     <style>
         body {
             background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
@@ -132,5 +131,24 @@
     <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
     
     {% block extra_js %}{% endblock %}
+    
+    <!-- SweetAlert2 -->
+    <script src="//cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    {% if messages %}
+    <script>
+        {% for message in messages %}
+            {% if message.tags == 'success' %}
+                Swal.fire({title: 'Success', text: '{{message}}', icon: 'success', toast: true, position: 'top-end', showConfirmButton: false, timer: 3000, timerProgressBar: true});
+            {% elif message.tags == 'error' %}
+                Swal.fire({title: 'Error', text: '{{message}}', icon: 'error', toast: true, position: 'top-end', showConfirmButton: false, timer: 3000, timerProgressBar: true});
+            {% elif message.tags == 'warning' %}
+                Swal.fire({title: 'Warning', text: '{{message}}', icon: 'warning', toast: true, position: 'top-end', showConfirmButton: false, timer: 3000, timerProgressBar: true});
+            {% elif message.tags == 'info' %}
+                Swal.fire({title: 'Info', text: '{{message}}', icon: 'info', toast: true, position: 'top-end', showConfirmButton: false, timer: 3000, timerProgressBar: true});
+            {% endif %}
+        {% endfor %}
+    </script>
+    {% endif %}
+
 </body>
 </html>

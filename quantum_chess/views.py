@@ -1,57 +1,120 @@
 """
-Fixed views for Quantum Chess Django application.
-Implements Move Declaration Rule from Game Rule/Move Declaration Rule.txt
-FIXED: Multiple bugs in quantum moves logic
+Views for Quantum Chess Django application.
+
+This module contains the views for handling game logic and rendering templates.
 """
 
 import json
 import chess
+import random
+import sweetify
 from django.shortcuts import render, get_object_or_404, redirect
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
+from django.utils.decorators import method_decorator
 
 from .models import Game, Move, QuantumPiece as GameQuantumPiece
 from .quantum.quant import QuantumPiece as QPiece, QuantumGame
 
 
 def index(request):
+    """
+    Home page view - displays the main landing page.
+    """
     return render(request, 'quantum_chess/index.html')
 
 
 def game(request, game_id):
+    """
+    Game view - displays the chess board for a specific game.
+    """
     game_obj = get_object_or_404(Game, id=game_id)
+    
+    # Update status from 'waiting' to 'active' when player accesses the game
     if game_obj.status == 'waiting':
         game_obj.status = 'active'
         game_obj.save()
-    return render(request, 'quantum_chess/game.html', {'game': game_obj})
+    
+    return render(request, 'quantum_chess/game.html', {
+        'game': game_obj,
+    })
+
 
 
 def new_game(request):
+    """
+    Create a new quantum chess game and redirect to the game page.
+    """
     game_obj = Game.objects.create(
         status='waiting',
         current_turn=True,
         fen_position=chess.STARTING_FEN,
         quantum_mode=False,
     )
+    # Redirect to the game page with the new game ID
     return redirect('quantum_chess:game', game_id=game_obj.id)
+
+
+def resolve_quantum_piece_measurement(qp, target_square):
+    """
+    Resolve a quantum piece measurement - determine if it's at the target square or elsewhere.
+    
+    Returns:
+        dict with keys:
+            - is_at_target: bool - whether the piece is at the target square
+            - actual_position: str - the actual position of the piece
+            - probability: float - probability at the target
+    """
+    all_positions = []
+    target_prob = 0.0
+    total_prob = 0.0
+    
+    for state_id, state_data in qp.qnum.items():
+        pos, prob = state_data[0], state_data[1]
+        all_positions.append((pos, prob))
+        total_prob += prob
+        if pos == target_square:
+            target_prob += prob
+    
+    # Determine actual position based on probability
+    rand = random.random() * total_prob
+    cum_prob = 0.0
+    
+    for pos, prob in all_positions:
+        cum_prob += prob
+        if rand < cum_prob:
+            return {
+                'is_at_target': pos == target_square,
+                'actual_position': pos,
+                'probability': prob / total_prob if total_prob > 0 else 0
+            }
+    
+    # Fallback
+    return {
+        'is_at_target': all_positions[0][0] == target_square if all_positions else False,
+        'actual_position': all_positions[0][0] if all_positions else None,
+        'probability': all_positions[0][1] / total_prob if all_positions and total_prob > 0 else 0
+    }
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 def make_move(request):
     """
-    Make move with proper measurement logic per Game Rule/measuring.txt
-    and Move Declaration Rule.txt
+    API endpoint to make a move in the quantum chess game.
+    Implements measurement rules according to game rules:
+    - Measurements trigger when a square is in superposition of different pieces
+    - Schrödinger's cat: capture without measurement if no conflict
+    - Minimal influence: only resolve specific conflicts
     
-    Move Declaration Rule:
-    1. Declare move (type + target square(s)) - Lock BEFORE measurement
-    2. Identify quantum involvement
-    3. Trigger measurement if required
-    4. Collapse affected quantum states
-    5. Validate declared move against new classical board state
-    6. Execute move if valid
-    7. Otherwise, move fails
+    Quantum Piece Capture Rules:
+    - Instance 1 (Real Attacker + Real Defender): Remove fake pieces of both, 
+      attacker captures defender, attacker becomes classical
+    - Instance 2 (Real Attacker + Fake Defender): Remove fake instances of both, 
+      attacker remains at original square
+    - Instance 3 (Fake Attacker + Fake Defender): Remove fake pieces from board,
+      attacker remains on original square
     """
     try:
         data = json.loads(request.body)
@@ -61,228 +124,470 @@ def make_move(request):
         promotion = data.get('promotion')
         quantum_mode = data.get('quantum_mode', False)
         
-        print(f"DEBUG: game_id={game_id}, from={from_square}, to={to_square}, quantum_mode={quantum_mode}")
-        
         game_obj = get_object_or_404(Game, id=game_id)
-        print(f"DEBUG: Game found, FEN={game_obj.fen_position[:50]}...")
         
-        # Handle quantum mode toggle
+        # Handle quantum mode toggle without a move
         if from_square is None and to_square is None:
             game_obj.quantum_mode = quantum_mode
             game_obj.save()
-            return JsonResponse({'success': True, 'quantum_mode': game_obj.quantum_mode, 'message': 'Quantum mode updated'})
+            return JsonResponse({
+                'success': True,
+                'quantum_mode': game_obj.quantum_mode,
+                'message': 'Quantum mode updated'
+            })
         
+        # Parse chess squares
         from_sq = chess.parse_square(from_square) if isinstance(from_square, str) else from_square
         to_sq = chess.parse_square(to_square) if isinstance(to_square, str) else to_square
         
+        # Create chess board from FEN
         board = chess.Board(fen=game_obj.fen_position)
         
-        # Get quantum pieces data early - needed for quantum capture detection
+        # Debug logging - include in JSON response for frontend display
+        debug_messages = [f"Move: {from_square} → {to_square}"]
+        
+        # Get quantum pieces data and set up quantum game
         quantum_pieces_data = game_obj.quantum_pieces if game_obj.quantum_pieces else []
         from_square_name = chess.square_name(from_sq)
         to_square_name = chess.square_name(to_sq)
         
-        # ========================================================================
-        # STEP 1: DECLARE MOVE TYPE - Lock BEFORE measurement (Move Declaration Rule)
-        # ========================================================================
+        # Create QuantumGame instance to handle measurement logic
+        quantum_game = QuantumGame()
+        quantum_game.quantum_mode = True
+        
+        # Load existing quantum pieces
+        for qp_data in quantum_pieces_data:
+            qp = QPiece(qp_data.get('position', 'a1'), qp_data.get('piece'))
+            qp.qnum = qp_data.get('qnum', {'0': [qp_data.get('position', 'a1'), 1]})
+            quantum_game.quantum_pieces.append(qp)
+        
+        # Get the piece being moved
+        piece = board.piece_at(from_sq)
+        moved_piece_symbol = piece.symbol() if piece else None
+        moving_piece_color = piece.color if piece else board.turn
+        
+        # Check if this is a capture
+        is_capture = board.is_capture(chess.Move(from_sq, to_sq))
+        
+        # Handle quantum piece capture with proper instance handling
+        if is_capture:
+            # Check if attacker is quantum
+            attacker_qp = None
+            for qp in quantum_game.quantum_pieces:
+                for state_id, state_data in qp.qnum.items():
+                    if state_data[0] == from_square_name:
+                        attacker_qp = qp
+                        break
+                if attacker_qp:
+                    break
+            
+            # Check if defender is quantum
+            defender_qp = None
+            for qp in quantum_game.quantum_pieces:
+                for state_id, state_data in qp.qnum.items():
+                    if state_data[0] == to_square_name:
+                        defender_qp = qp
+                        break
+                if defender_qp:
+                    break
+            
+            # If EITHER is quantum, handle with quantum capture rules
+            if attacker_qp or defender_qp:
+                debug_messages.append('Quantum capture detected!')
+
+                attacker_result = None
+                defender_result = None
+                
+                # Measure attacker if quantum
+                if attacker_qp:
+                    attacker_result = resolve_quantum_piece_measurement(attacker_qp, from_square_name)
+                    debug_messages.append(f"Attacker measured at {from_square_name}: {attacker_result}")
+                
+                # Measure defender if quantum
+                if defender_qp:
+                    defender_result = resolve_quantum_piece_measurement(defender_qp, to_square_name)
+                    debug_messages.append(f"Defender measured at {to_square_name}: {defender_result}")
+                
+                # Determine which instance applies
+                attacker_is_real = not attacker_qp or (attacker_result and attacker_result['is_at_target'])
+                defender_is_real = not defender_qp or (defender_result and defender_result['is_at_target'])
+                
+                debug_messages.append(f"Instance check - Attacker: {attacker_is_real}, Defender: {defender_is_real}")
+                
+                if attacker_is_real and defender_is_real:
+                    # Instance 1: Real Attacker + Real Defender
+                    # Remove fake pieces of both, attacker captures defender, attacker becomes classical
+                    debug_messages.append('Instance 1: Real attacker captures real defender!')
+                    
+                    # Remove fake positions of attacker
+                    if attacker_qp:
+                        for state_id, state_data in list(attacker_qp.qnum.items()):
+                            if state_data[0] != from_square_name:
+                                other_sq = chess.parse_square(state_data[0])
+                                board.remove_piece_at(other_sq)
+                                del attacker_qp.qnum[state_id]
+                    
+                    # Remove fake positions of defender
+                    if defender_qp:
+                        for state_id, state_data in list(defender_qp.qnum.items()):
+                            if state_data[0] != to_square_name:
+                                other_sq = chess.parse_square(state_data[0])
+                                board.remove_piece_at(other_sq)
+                                del defender_qp.qnum[state_id]
+                    
+                    # Remove defender from quantum_pieces (captured)
+                    new_quantum_pieces = []
+                    for qp in quantum_game.quantum_pieces:
+                        is_defender = False
+                        for state_id, state_data in qp.qnum.items():
+                            if state_data[0] == to_square_name:
+                                is_defender = True
+                                break
+                        if not is_defender:
+                            new_quantum_pieces.append({
+                                'piece': str(qp.piece),
+                                'qnum': qp.qnum,
+                                'position': list(qp.qnum.values())[0][0] if qp.qnum else None,
+                                'entangled': [[str(e[0].piece) if e[0] else None, e[1], e[2]] for e in qp.ent]
+                            })
+                    quantum_pieces_data = new_quantum_pieces
+                    
+                    # Continue with normal capture processing below
+                    
+                elif not attacker_is_real and defender_is_real:
+                    # Instance 2 variant: Fake Attacker + Real Defender
+                    # Attacker is NOT at from_square (fake), so capture fails
+                    # Remove fake positions of attacker, attacker stays at actual position
+                    debug_messages.append('Instance 2: Fake attacker, real defender - capture failed!')
+                    
+                    # Remove fake attacker from from_square (it was never there)
+                    board.remove_piece_at(from_sq)
+                    
+                    # Place attacker at actual position
+                    if attacker_result and attacker_result['actual_position']:
+                        att_actual = attacker_result['actual_position']
+                        att_sq = chess.parse_square(att_actual)
+                        attacker_symbol = str(attacker_qp.piece) if attacker_qp else None
+                        if attacker_symbol:
+                            board.set_piece_at(att_sq, chess.Piece.from_symbol(attacker_symbol))
+                    
+                    # Remove fake positions of defender (keep real one at to_square)
+                    if defender_qp:
+                        for state_id, state_data in list(defender_qp.qnum.items()):
+                            if state_data[0] != to_square_name:
+                                other_sq = chess.parse_square(state_data[0])
+                                board.remove_piece_at(other_sq)
+                                del defender_qp.qnum[state_id]
+                    
+                    # Remove attacker from quantum_pieces, keep defender
+                    new_quantum_pieces = []
+                    for qp in quantum_game.quantum_pieces:
+                        is_attacker = False
+                        for state_id, state_data in qp.qnum.items():
+                            if state_data[0] == from_square_name:
+                                is_attacker = True
+                                break
+                        if not is_attacker:
+                            new_quantum_pieces.append({
+                                'piece': str(qp.piece),
+                                'qnum': qp.qnum,
+                                'position': list(qp.qnum.values())[0][0] if qp.qnum else None,
+                                'entangled': [[str(e[0].piece) if e[0] else None, e[1], e[2]] for e in qp.ent]
+                            })
+                    quantum_pieces_data = new_quantum_pieces
+                    
+                    # DO NOT complete the capture - update FEN and return
+                    game_obj.fen_position = board.fen()
+                    game_obj.current_turn = not game_obj.current_turn
+                    game_obj.quantum_pieces = quantum_pieces_data
+                    game_obj.save()
+                    
+                    # Record measurement
+                    move_count = Move.objects.filter(game=game_obj).count()
+                    Move.objects.create(
+                        game=game_obj,
+                        move_number=move_count // 2 + 1,
+                        is_white_move=moving_piece_color == chess.WHITE,
+                        move_type='measure',
+                        from_square=from_sq,
+                        to_square=to_sq,
+                        promotion=None,
+                        san=f'Measurement: Instance 2 - Fake attacker, real defender',
+                        fen_after=game_obj.fen_position
+                    )
+                    
+                    return JsonResponse({
+                        'success': True,
+                        'fen': game_obj.fen_position,
+                        'message': 'Instance 2: Fake attacker, real defender - capture failed',
+                        'turn': 'white' if game_obj.current_turn else 'black',
+                        'quantum_pieces': quantum_pieces_data,
+                        'measurement': {
+                            'instance': 2,
+                            'action': 'capture_fails',
+                            'attacker_is_real': False,
+                            'defender_is_real': True,
+                            'attacker_actual_position': attacker_result['actual_position'] if attacker_result else None
+                        }
+                    })
+                
+                elif attacker_is_real and not defender_is_real:
+                    # Instance 2: Real Attacker + Fake Defender
+                    # Remove fake instances of both, attacker stays at original square
+                    debug_messages.append('Instance 2: Real attacker, fake defender - capture failed!')
+                    
+                    # Remove fake positions of attacker
+                    if attacker_qp:
+                        for state_id, state_data in list(attacker_qp.qnum.items()):
+                            if state_data[0] != from_square_name:
+                                other_sq = chess.parse_square(state_data[0])
+                                board.remove_piece_at(other_sq)
+                                del attacker_qp.qnum[state_id]
+                    
+                    # Remove fake defender from to_square
+                    board.remove_piece_at(to_sq)
+                    
+                    # Place defender at actual position
+                    if defender_result and defender_result['actual_position']:
+                        def_actual = defender_result['actual_position']
+                        def_sq = chess.parse_square(def_actual)
+                        defender_symbol = str(defender_qp.piece) if defender_qp else None
+                        if defender_symbol:
+                            board.set_piece_at(def_sq, chess.Piece.from_symbol(defender_symbol))
+                    
+                    # Remove both from quantum_pieces
+                    new_quantum_pieces = []
+                    for qp in quantum_game.quantum_pieces:
+                        is_involved = False
+                        for state_id, state_data in qp.qnum.items():
+                            if state_data[0] == from_square_name or state_data[0] == to_square_name:
+                                is_involved = True
+                                break
+                        if not is_involved:
+                            new_quantum_pieces.append({
+                                'piece': str(qp.piece),
+                                'qnum': qp.qnum,
+                                'position': list(qp.qnum.values())[0][0] if qp.qnum else None,
+                                'entangled': [[str(e[0].piece) if e[0] else None, e[1], e[2]] for e in qp.ent]
+                            })
+                    quantum_pieces_data = new_quantum_pieces
+                    
+                    # DO NOT complete the capture - update FEN and return
+                    game_obj.fen_position = board.fen()
+                    game_obj.current_turn = not game_obj.current_turn
+                    game_obj.quantum_pieces = quantum_pieces_data
+                    game_obj.save()
+                    
+                    # Record measurement
+                    move_count = Move.objects.filter(game=game_obj).count()
+                    Move.objects.create(
+                        game=game_obj,
+                        move_number=move_count // 2 + 1,
+                        is_white_move=moving_piece_color == chess.WHITE,
+                        move_type='measure',
+                        from_square=from_sq,
+                        to_square=to_sq,
+                        promotion=None,
+                        san=f'Measurement: Instance 2 - Real attacker, fake defender',
+                        fen_after=game_obj.fen_position
+                    )
+                    
+                    return JsonResponse({
+                        'success': True,
+                        'fen': game_obj.fen_position,
+                        'message': 'Instance 2: Real attacker, fake defender - capture failed',
+                        'turn': 'white' if game_obj.current_turn else 'black',
+                        'quantum_pieces': quantum_pieces_data,
+                        'measurement': {
+                            'instance': 2,
+                            'action': 'capture_fails',
+                            'attacker_is_real': True,
+                            'defender_is_real': False,
+                            'defender_actual_position': defender_result['actual_position'] if defender_result else None
+                        }
+                    })
+                    
+                elif not attacker_is_real and not defender_is_real:
+                    # Instance 3: Fake Attacker + Fake Defender
+                    # Fake pieces removed, attacker stays at original square
+                    debug_messages.append('Instance 3: Both fake - capture failed!')
+                    
+                    # Remove fake attacker from from_square
+                    board.remove_piece_at(from_sq)
+                    
+                    # Remove fake defender from to_square  
+                    board.remove_piece_at(to_sq)
+                    
+                    # Place attacker at actual position
+                    if attacker_result and attacker_result['actual_position']:
+                        att_actual = attacker_result['actual_position']
+                        att_sq = chess.parse_square(att_actual)
+                        attacker_symbol = str(attacker_qp.piece) if attacker_qp else None
+                        if attacker_symbol:
+                            board.set_piece_at(att_sq, chess.Piece.from_symbol(attacker_symbol))
+                    
+                    # Place defender at actual position
+                    if defender_result and defender_result['actual_position']:
+                        def_actual = defender_result['actual_position']
+                        def_sq = chess.parse_square(def_actual)
+                        defender_symbol = str(defender_qp.piece) if defender_qp else None
+                        if defender_symbol:
+                            board.set_piece_at(def_sq, chess.Piece.from_symbol(defender_symbol))
+                    
+                    # Remove both from quantum_pieces
+                    new_quantum_pieces = []
+                    for qp in quantum_game.quantum_pieces:
+                        is_involved = False
+                        for state_id, state_data in qp.qnum.items():
+                            if state_data[0] == from_square_name or state_data[0] == to_square_name:
+                                is_involved = True
+                                break
+                        if not is_involved:
+                            new_quantum_pieces.append({
+                                'piece': str(qp.piece),
+                                'qnum': qp.qnum,
+                                'position': list(qp.qnum.values())[0][0] if qp.qnum else None,
+                                'entangled': [[str(e[0].piece) if e[0] else None, e[1], e[2]] for e in qp.ent]
+                            })
+                    quantum_pieces_data = new_quantum_pieces
+                    
+                    # DO NOT complete the capture - update FEN and return
+                    game_obj.fen_position = board.fen()
+                    game_obj.current_turn = not game_obj.current_turn
+                    game_obj.quantum_pieces = quantum_pieces_data
+                    game_obj.save()
+                    
+                    # Record measurement
+                    move_count = Move.objects.filter(game=game_obj).count()
+                    Move.objects.create(
+                        game=game_obj,
+                        move_number=move_count // 2 + 1,
+                        is_white_move=moving_piece_color == chess.WHITE,
+                        move_type='measure',
+                        from_square=from_sq,
+                        to_square=to_sq,
+                        promotion=None,
+                        san=f'Measurement: Instance 3 - Both fake',
+                        fen_after=game_obj.fen_position
+                    )
+                    
+                    return JsonResponse({
+                        'success': True,
+                        'fen': game_obj.fen_position,
+                        'message': 'Instance 3: Both fake - capture failed',
+                        'turn': 'white' if game_obj.current_turn else 'black',
+                        'quantum_pieces': quantum_pieces_data,
+                        'measurement': {
+                            'instance': 3,
+                            'action': 'both_fake',
+                            'attacker_is_real': False,
+                            'defender_is_real': False,
+                            'attacker_actual_position': attacker_result['actual_position'] if attacker_result else None,
+                            'defender_actual_position': defender_result['actual_position'] if defender_result else None
+                        }
+                    })
+        
+        # Create move
         move = chess.Move(from_sq, to_sq)
         if promotion:
             move.promotion = chess.Piece.from_symbol(promotion).piece_type
         
-        # BUG FIX: Check if target has quantum piece BEFORE checking classical capture
-        # After quantum split, pieces exist in superposition, not on the classical board
-        # Also check for quantum pieces at the source (for moving piece)
-        source_has_quantum = False
-        target_has_quantum = False
-        source_quantum_piece = None  # Store the quantum piece at source for later use
-        target_quantum_piece = None  # Store the quantum piece at target for later use
-        
-        for qp in quantum_pieces_data:
-            for state_id, state_data in qp.get('qnum', {}).items():
-                if state_data[0] == from_square_name:
-                    source_has_quantum = True
-                    source_quantum_piece = qp
-                if state_data[0] == to_square_name:
-                    target_has_quantum = True
-                    target_quantum_piece = qp
-        
-        # Check if declared as capture - include quantum piece targets
-        is_capture_declared = board.is_capture(move) or target_has_quantum
-        declared_move_type = 'capture' if is_capture_declared else 'classical'
-        
-        # FIX: Handle quantum piece moves - source may not have classical piece
-        # If source has quantum piece, we need different validation
-        piece = None
-        if source_has_quantum:
-            # Source has quantum piece - don't validate against classical board
-            # The quantum piece will be measured when making the move
-            piece = chess.Piece.from_symbol(source_quantum_piece.get('piece', 'P')) if source_quantum_piece else None
-        else:
-            piece = board.piece_at(from_sq)
-        
-        moved_piece_symbol = piece.symbol() if piece else None
+        # Check if move is legal
+        if move not in board.legal_moves:
+            return JsonResponse({
+                'success': False,
+                'error': 'Illegal move',
+                'debug': {
+                    'fen': board.fen(),
+                    'turn': 'white' if board.turn == chess.WHITE else 'black',
+                    'requested_move': f"{from_square}->{to_square}",
+                }
+            }, status=400)
 
-        # FIX: Validate move only if it's not a quantum piece source
-        # Quantum pieces are measured and validated during the measurement step
-        # Allow captures since quantum pieces may not be on classical board
-        if not source_has_quantum and not is_capture_declared:
-            try:
-                legal_moves = list(board.legal_moves)
-                if move not in legal_moves:
-                    return JsonResponse({'success': False, 'error': 'Illegal move'}, status=400)
-            except Exception as e:
-                return JsonResponse({'success': False, 'error': f'Move validation error: {str(e)}'}, status=400)
-
-        # ========================================================================
-        # STEP 2-4: Identify quantum involvement and trigger measurement
-        # ========================================================================
         
-        # FIXED: Use position-based tracking instead of list indices
-        # This prevents index shifting issues when pieces are removed from the list
+        # Check if we're capturing a quantum piece at the destination
+        captured_quantum_index = None
+        captured_quantum_positions = []
         
-        # Check if moving piece is quantum (attacker) - get piece symbol for reconstruction
-        moving_quantum_piece = None
-        moving_quantum_positions = {}  # Store positions to check after removal
-        for qp in quantum_pieces_data:
-            for state_id, state_data in qp.get('qnum', {}).items():
-                if state_data[0] == from_square_name:
-                    moving_quantum_piece = qp.get('piece')
-                    moving_quantum_positions[from_square_name] = qp
-                    break
-            if moving_quantum_piece:
-                break
-        
-        # Check if capturing a quantum piece (defender)
-        captured_quantum_piece = None
-        captured_quantum_positions = {}  # Store positions to check after removal
-        for qp in quantum_pieces_data:
+        for i, qp in enumerate(quantum_pieces_data):
             for state_id, state_data in qp.get('qnum', {}).items():
                 if state_data[0] == to_square_name:
-                    captured_quantum_piece = qp.get('piece')
-                    captured_quantum_positions[to_square_name] = qp
+                    captured_quantum_index = i
+                    for all_state_id, all_state_data in qp.get('qnum', {}).items():
+                        captured_quantum_positions.append(all_state_data[0])
                     break
-            if captured_quantum_piece:
+            if captured_quantum_index is not None:
                 break
         
-        # ========================================================================
-        # STEP 3: Trigger measurement if required (Move Declaration Rule)
-        # ========================================================================
+        # Check if the piece being moved is in quantum state
+        moving_quantum_index = None
+        moving_quantum_other_positions = []
         
-        # Make a temp copy for measurement logic
-        measured_quantum_pieces = json.loads(json.dumps(quantum_pieces_data))
-        
-        # Helper to reconstruct entanglement relationships
-        def reconstruct_entanglement(qp_data):
-            """Reconstruct QuantumPiece with entanglement from stored data"""
-            qp = QPiece(qp_data.get('position', 'a1'), qp_data.get('piece'))
-            qp.qnum = qp_data.get('qnum', {'0': [qp_data.get('position', 'a1'), 1]})
-            ent_data = qp_data.get('entangled', [])
-            reconstructed_ent = []
-            for ent_item in ent_data:
-                piece_str = ent_item[0]
-                state = ent_item[1]
-                related_state = ent_item[2]
-                # Look through the current measured pieces
-                for other_qp_data in measured_quantum_pieces:
-                    if other_qp_data.get('piece') == piece_str:
-                        other_qp = QPiece(other_qp_data.get('position', 'a1'), other_qp_data.get('piece'))
-                        other_qp.qnum = other_qp_data.get('qnum', {'0': [other_qp_data.get('position', 'a1'), 1]})
-                        reconstructed_ent.append((other_qp, state, related_state))
-                        break
-            qp.ent = reconstructed_ent
-            return qp
-        
-        # FIXED: Process the moving (attacking) piece FIRST before any removals
-        # This avoids index shifting issues
-        if moving_quantum_piece and is_capture_declared:
-            # Find the moving quantum piece data in the measured list
-            for i, qp_data in enumerate(measured_quantum_pieces):
-                found = False
-                for state_id, state_data in qp_data.get('qnum', {}).items():
-                    if state_data[0] == from_square_name:
-                        found = True
-                        break
-                if found:
-                    temp_qp = reconstruct_entanglement(qp_data)
-                    measured_pos, prob = temp_qp.measure()
-                    # Remove from measured list after measurement
-                    measured_quantum_pieces.pop(i)
-                    
-                    # Validate declared move against new state
-                    if measured_pos != from_square_name:
-                        temp_board = chess.Board(fen=game_obj.fen_position)
-                        measured_from_sq = chess.parse_square(measured_pos)
-                        attack_move = chess.Move(measured_from_sq, to_sq)
-                        
-                        if attack_move not in temp_board.legal_moves:
-                            return JsonResponse({
-                                'success': False, 
-                                'error': f'Capture failed - piece collapsed to {measured_pos}',
-                                'fen': game_obj.fen_position,
-                                'move_type': declared_move_type
-                            })
+        for i, qp in enumerate(quantum_pieces_data):
+            for state_id, state_data in qp.get('qnum', {}).items():
+                if state_data[0] == from_square_name:
+                    moving_quantum_index = i
+                    for other_state_id, other_state_data in qp.get('qnum', {}).items():
+                        if other_state_id != state_id:
+                            moving_quantum_other_positions.append(other_state_data[0])
                     break
+            if moving_quantum_index is not None:
+                break
         
-        # FIXED: Now process the captured (defending) piece - indices are now stable
-        if captured_quantum_piece:
-            # Find the captured quantum piece data in the measured list
-            for i, qp_data in enumerate(measured_quantum_pieces):
-                found = False
-                for state_id, state_data in qp_data.get('qnum', {}).items():
-                    if state_data[0] == to_square_name:
-                        found = True
-                        break
-                if found:
-                    temp_qp = reconstruct_entanglement(qp_data)
-                    measured_pos, prob = temp_qp.measure()
-                    # Remove from measured list
-                    measured_quantum_pieces.pop(i)
-                    
-                    # Validate declared move
-                    if declared_move_type == 'capture':
-                        if measured_pos != to_square_name:
-                            return JsonResponse({
-                                'success': False,
-                                'error': f'Capture failed - defender collapsed to {measured_pos}',
-                                'fen': game_obj.fen_position,
-                                'move_type': declared_move_type
-                            })
-                    break
-        
-        # ========================================================================
-        # STEP 6: Execute move if valid
-        # ========================================================================
-        
-        # FIX: For quantum pieces, we need to add the piece to the board first
-        # since it doesn't exist on the classical board
-        if source_has_quantum and piece:
-            board.set_piece_at(from_sq, piece)
-        
-        board.push(move)
-        # Get SAN of the move that was just pushed
-        san = board.san(board.pop())
+        # Make the move
+        san = board.san(move)
         board.push(move)
         
-        # FIX: If source had quantum piece, the piece is already moved by push()
-        # No need to manually remove - the push() handles it
+        # Handle captures of quantum pieces
+        if captured_quantum_index is not None and captured_quantum_positions:
+            debug_messages.append(f'Capturing quantum piece at {to_square_name}')
+            
+            board.remove_piece_at(to_sq)
+            
+            captured_piece_type = quantum_pieces_data[captured_quantum_index].get('piece')
+            quantum_pieces_data.pop(captured_quantum_index)
+            
+            if captured_piece_type:
+                board.set_piece_at(to_sq, chess.Piece.from_symbol(captured_piece_type))
         
-        # Update quantum pieces with measured state
-        quantum_pieces_data = measured_quantum_pieces
-        
-        # Handle piece placement based on capture result
-        # FIXED: Use the captured_quantum_piece variable instead of index
-        if is_capture_declared and captured_quantum_piece:
-            if moved_piece_symbol:
-                board.set_piece_at(to_sq, chess.Piece.from_symbol(moved_piece_symbol))
+        # Handle moving quantum piece - collapse other superpositions
+        if moving_quantum_index is not None and moving_quantum_other_positions:
+            debug_messages.append(f'Collapsing quantum piece from {from_square_name}')
+            for other_pos in moving_quantum_other_positions:
+                other_sq = chess.parse_square(other_pos)
+                board.remove_piece_at(other_sq)
+            
+            adjusted_index = moving_quantum_index
+            if captured_quantum_index is not None and captured_quantum_index < moving_quantum_index:
+                adjusted_index = moving_quantum_index - 1
+            
+            if adjusted_index < len(quantum_pieces_data):
+                quantum_pieces_data[adjusted_index]['qnum'] = {
+                    '0': [to_square_name, 1.0]
+                }
+                quantum_pieces_data[adjusted_index]['entangled'] = []
+
         
         # Update game status
-        game_obj.status = update_game_status(board, quantum_pieces_data)
+        if board.is_checkmate():
+            game_obj.status = 'checkmate'
+        elif board.is_stalemate():
+            game_obj.status = 'stalemate'
+        elif board.is_insufficient_material():
+            game_obj.status = 'draw'
+        else:
+            game_obj.status = 'active'
+        
+        # Update game
         game_obj.fen_position = board.fen()
         game_obj.current_turn = not game_obj.current_turn
         game_obj.quantum_mode = quantum_mode
         game_obj.quantum_pieces = quantum_pieces_data
         game_obj.save()
 
+
+        
+        # Record move
         move_count = Move.objects.filter(game=game_obj).count()
         Move.objects.create(
             game=game_obj,
@@ -297,79 +602,26 @@ def make_move(request):
         )
         
         return JsonResponse({
-            'success': True, 
-            'fen': board.fen(), 
-            'san': san, 
+            'success': True,
+            'fen': board.fen(),
+            'san': san,
             'turn': 'white' if board.turn == chess.WHITE else 'black',
-            'move_type': declared_move_type,
-            'quantum_pieces': quantum_pieces_data
+            'debug_messages': debug_messages,
         })
         
     except Exception as e:
-        return JsonResponse({'success': False, 'error': str(e)}, status=500)
-
-
-def update_game_status(board, quantum_pieces):
-    """Update game status considering quantum rules for king in superposition"""
-    turn_color = board.turn
-    
-    king_square = None
-    for sq in chess.SQUARES:
-        piece = board.piece_at(sq)
-        if piece and piece.piece_type == chess.KING and piece.color == turn_color:
-            king_square = sq
-            break
-    
-    if not king_square:
-        return 'active'
-    
-    king_positions = [chess.square_name(king_square)]
-    
-    if quantum_pieces:
-        for qp in quantum_pieces:
-            piece_symbol = qp.get('piece', '')
-            if 'K' in piece_symbol:
-                for state_id, state_data in qp.get('qnum', {}).items():
-                    if state_data[0]:
-                        king_positions.append(state_data[0])
-    
-    in_check = False
-    for pos in king_positions:
-        sq = chess.parse_square(pos)
-        if board.is_attacked_by(not turn_color, sq):
-            in_check = True
-            break
-    
-    if not in_check:
-        return 'active'
-    
-    can_escape = False
-    for pos in king_positions:
-        temp_board = chess.Board(fen=board.fen())
-        temp_board.turn = turn_color
-        
-        for move in temp_board.legal_moves:
-            test_board = chess.Board(fen=temp_board.fen())
-            test_board.push(move)
-            new_king_sq = move.to_square
-            
-            if not test_board.is_attacked_by(not turn_color, new_king_sq):
-                can_escape = True
-                break
-        
-        if can_escape:
-            break
-    
-    return 'checkmate' if not can_escape else 'active'
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 def quantum_split(request):
     """
-    API endpoint to perform a quantum split move
-    Per Move Declaration Rule: Split requires two legal destination squares
-    FIXED: Turn switching, board state, position field
+    API endpoint to perform a quantum split move.
+    Splits a piece into two positions in superposition.
     """
     try:
         data = json.loads(request.body)
@@ -380,43 +632,68 @@ def quantum_split(request):
         
         game_obj = get_object_or_404(Game, id=game_id)
         
+        # Parse chess squares
         from_sq = chess.parse_square(from_square) if isinstance(from_square, str) else from_square
         to_sq1 = chess.parse_square(to_square1) if isinstance(to_square1, str) else to_square1
         to_sq2 = chess.parse_square(to_square2) if isinstance(to_square2, str) else to_square2
         
+        # Get or create quantum game state
         quantum_pieces_data = game_obj.quantum_pieces if game_obj.quantum_pieces else []
         
+        # Create a new QuantumGame instance
         quantum_game = QuantumGame()
         quantum_game.quantum_mode = True
         
-        # Reconstruct quantum pieces with position field
+        # Load existing quantum pieces if any
         for qp_data in quantum_pieces_data:
-            position = qp_data.get('position', 'a1')
-            if 'qnum' in qp_data and qp_data['qnum']:
-                first_state = list(qp_data['qnum'].values())[0]
-                if first_state and first_state[0]:
-                    position = first_state[0]
-            
-            qp = QPiece(position, qp_data.get('piece'))
-            qp.qnum = qp_data.get('qnum', {'0': [position, 1]})
+            qp = QPiece(qp_data.get('position', 'a1'), qp_data.get('piece'))
+            qp.qnum = qp_data.get('qnum', {'0': [qp_data.get('position', 'a1'), 1]})
             quantum_game.quantum_pieces.append(qp)
         
+        # Find or create the quantum piece at from_square
         from_square_name = chess.square_name(from_sq)
+        
+        # Find the piece at the from square
         board = chess.Board(fen=game_obj.fen_position)
         piece = board.piece_at(from_sq)
         
         if not piece:
-            return JsonResponse({'success': False, 'error': 'No piece at the source square'}, status=400)
+            return JsonResponse({
+                'success': False,
+                'error': 'No piece at the source square'
+            }, status=400)
         
-        # Two different target squares required
-        if to_sq1 == to_sq2:
-            return JsonResponse({'success': False, 'error': 'Illegal split: target squares must be different'}, status=400)
+        # Validate that target squares are legal moves for this piece
+        temp_board = chess.Board(fen=game_obj.fen_position)
+        legal_moves = [move for move in temp_board.legal_moves if move.from_square == from_sq]
+        legal_targets = {move.to_square for move in legal_moves}
         
-        # In non-quantum mode, target squares must be empty
-        if not game_obj.quantum_mode:
-            if board.piece_at(to_sq1) or board.piece_at(to_sq2):
-                return JsonResponse({'success': False, 'error': 'Illegal split: target squares must be empty'}, status=400)
+        if to_sq1 not in legal_targets:
+            return JsonResponse({
+                'success': False,
+                'error': f'Illegal split: {to_square1} is not a valid move for this piece'
+            }, status=400)
         
+        if to_sq2 not in legal_targets:
+            return JsonResponse({
+                'success': False,
+                'error': f'Illegal split: {to_square2} is not a valid move for this piece'
+            }, status=400)
+        
+        # Rule: It is illegal to capture on split - target squares must be empty
+        if board.piece_at(to_sq1):
+            return JsonResponse({
+                'success': False,
+                'error': f'Illegal split: {to_square1} is occupied. Capturing is not allowed during quantum split'
+            }, status=400)
+        
+        if board.piece_at(to_sq2):
+            return JsonResponse({
+                'success': False,
+                'error': f'Illegal split: {to_square2} is occupied. Capturing is not allowed during quantum split'
+            }, status=400)
+        
+        # Check if piece already exists in quantum state
         existing_qp = None
         existing_state = None
         for qp in quantum_game.quantum_pieces:
@@ -434,38 +711,46 @@ def quantum_split(request):
             qp = quantum_game.add_quantum_piece(from_square_name, piece.symbol())
             qp.split('0', chess.square_name(to_sq1), chess.square_name(to_sq2))
         
-        # Store with position field
+        # Save quantum pieces state
         quantum_pieces_data = []
         for qp in quantum_game.quantum_pieces:
-            position = 'a1'
-            if qp.qnum:
-                first_state = list(qp.qnum.values())[0]
-                if first_state and first_state[0]:
-                    position = first_state[0]
-            
             quantum_pieces_data.append({
-                'piece': str(qp.piece), 
-                'position': position,
-                'qnum': qp.qnum, 
+                'piece': str(qp.piece),
+                'qnum': qp.qnum,
                 'entangled': [[str(e[0].piece) if e[0] else None, e[1], e[2]] for e in qp.ent]
             })
         
         game_obj.quantum_pieces = quantum_pieces_data
         game_obj.quantum_mode = True
         
-        # FIXED: Remove piece from source square on classical board after quantum split
-        # The piece now exists in superposition at the two target squares, not at the source
-        # This prevents the piece from appearing twice (classically and quantumly)
+        # Update the board FEN to remove the piece from original position
         board.remove_piece_at(from_sq)
-
-        # FIXED: Switch turns after quantum split - must flip board.turn before getting FEN
-        # In chess, after any move (including quantum split), the turn switches to the other player
+        
+        # Add the piece to BOTH target positions
+        board.set_piece_at(to_sq1, piece)
+        board.set_piece_at(to_sq2, piece)
+        
+        # Switch turn in the FEN
         board.turn = not board.turn
         game_obj.fen_position = board.fen()
-        game_obj.current_turn = board.turn
-        game_obj.status = update_game_status(board, quantum_pieces_data)
+
+        
+        # Switch turn after quantum split
+        game_obj.current_turn = not game_obj.current_turn
+        
+        # Update game status
+        if board.is_checkmate():
+            game_obj.status = 'checkmate'
+        elif board.is_stalemate():
+            game_obj.status = 'stalemate'
+        elif board.is_insufficient_material():
+            game_obj.status = 'draw'
+        else:
+            game_obj.status = 'active'
+        
         game_obj.save()
 
+        # Record the split move
         move_count = Move.objects.filter(game=game_obj).count()
         Move.objects.create(
             game=game_obj,
@@ -475,28 +760,36 @@ def quantum_split(request):
             from_square=from_sq,
             to_square=to_sq1,
             promotion=None,
-            san=f'S/{to_square1[0]}{to_square2[0]}',
+            san=f'Split: {from_square}→{to_square1}/{to_square2}',
             fen_after=game_obj.fen_position
         )
         
         return JsonResponse({
-            'success': True, 
-            'message': 'Quantum split performed', 
-            'from_square': from_square, 
-            'to_square1': to_square1, 
-            'to_square2': to_square2, 
-            'fen': game_obj.fen_position, 
-            'quantum_pieces': quantum_pieces_data, 
+            'success': True,
+            'message': 'Quantum split performed',
+            'from_square': from_square,
+            'to_square1': to_square1,
+            'to_square2': to_square2,
+            'fen': game_obj.fen_position,
+            'quantum_pieces': quantum_pieces_data,
             'turn': 'white' if game_obj.current_turn else 'black',
-            'move_type': 'split'
         })
+
+
+        
     except Exception as e:
-        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 def toggle_quantum_mode(request):
+    """
+    API endpoint to toggle quantum mode for a game.
+    """
     try:
         data = json.loads(request.body)
         game_id = data.get('game_id')
@@ -506,106 +799,50 @@ def toggle_quantum_mode(request):
         game_obj.quantum_mode = quantum_mode
         game_obj.save()
         
-        return JsonResponse({'success': True, 'quantum_mode': game_obj.quantum_mode, 'message': 'Quantum mode ' + ('enabled' if quantum_mode else 'disabled')})
+        message = 'Quantum mode ' + ('enabled' if quantum_mode else 'disabled')
+        sweetify.success(request, message)
+        return JsonResponse({
+            'success': True,
+            'quantum_mode': game_obj.quantum_mode,
+            'message': 'Quantum mode ' + ('enabled' if quantum_mode else 'disabled')
+        })
+        
     except Exception as e:
-        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 def quantum_entangle(request):
     """
-    API endpoint to perform a quantum entanglement - CASE B
-    FIXED: Now properly updates FEN and switches turns
+    API endpoint to perform a quantum entanglement.
     """
     try:
         data = json.loads(request.body)
         game_id = data.get('game_id')
-        from_square = data.get('from_square')
-        to_square = data.get('to_square')
-        through_square = data.get('through_square')
         
         game_obj = get_object_or_404(Game, id=game_id)
         
-        quantum_pieces_data = game_obj.quantum_pieces if game_obj.quantum_pieces else []
-        quantum_game = QuantumGame()
-        quantum_game.quantum_mode = True
-        
-        for qp_data in quantum_pieces_data:
-            qp = QPiece(qp_data.get('position', 'a1'), qp_data.get('piece'))
-            qp.qnum = qp_data.get('qnum', {'0': [qp_data.get('position', 'a1'), 1]})
-            quantum_game.quantum_pieces.append(qp)
-        
-        from_sq = chess.parse_square(from_square) if isinstance(from_square, str) else from_square
-        to_sq = chess.parse_square(to_square) if isinstance(to_square, str) else to_square
-        through_sq = chess.parse_square(through_square) if isinstance(through_square, str) else through_square
-        
-        from_square_name = chess.square_name(from_sq)
-        to_square_name = chess.square_name(to_sq)
-        through_square_name = chess.square_name(through_sq)
-        
-        board = chess.Board(fen=game_obj.fen_position)
-        moving_piece = board.piece_at(from_sq)
-        
-        if not moving_piece:
-            return JsonResponse({'success': False, 'error': 'No piece at the source square'}, status=400)
-        
-        blocking_quantum = None
-        blocking_state = None
-        for qp in quantum_game.quantum_pieces:
-            for state_id, state_data in qp.qnum.items():
-                if state_data[0] == through_square_name:
-                    blocking_quantum = qp
-                    blocking_state = state_id
-                    break
-            if blocking_quantum:
-                break
-        
-        if blocking_quantum:
-            moving_quantum = None
-            for qp in quantum_game.quantum_pieces:
-                for state_id, state_data in qp.qnum.items():
-                    if state_data[0] == from_square_name:
-                        moving_quantum = qp
-                        break
-                if moving_quantum:
-                    break
-            
-            if moving_quantum:
-                moving_quantum.entangle_oneblock('0', to_square_name, blocking_quantum, blocking_state or '0')
-            else:
-                moving_quantum = quantum_game.add_quantum_piece(from_square_name, moving_piece.symbol())
-                moving_quantum.entangle_oneblock('0', to_square_name, blocking_quantum, blocking_state or '0')
-        
-        quantum_pieces_data = []
-        for qp in quantum_game.quantum_pieces:
-            quantum_pieces_data.append({'piece': str(qp.piece), 'qnum': qp.qnum, 'entangled': [[str(e[0].piece) if e[0] else None, e[1], e[2]] for e in qp.ent]})
-        
-        game_obj.quantum_pieces = quantum_pieces_data
-        
-        # FIXED: Update FEN and switch turns after entanglement
-        game_obj.fen_position = board.fen()
-        game_obj.current_turn = not game_obj.current_turn
-        game_obj.status = update_game_status(board, quantum_pieces_data)
-        game_obj.save()
-        
         return JsonResponse({
-            'success': True, 
-            'message': 'Quantum entanglement performed', 
-            'quantum_pieces': quantum_pieces_data,
-            'fen': game_obj.fen_position,
-            'turn': 'white' if game_obj.current_turn else 'black'
+            'success': True,
+            'message': 'Quantum entanglement performed',
         })
+        
     except Exception as e:
-        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 def measure_piece(request):
     """
-    API endpoint to measure a quantum piece - handles CASE A/B/C
-    FIXED: Now properly updates FEN with the measured position
+    API endpoint to measure a quantum piece.
     """
     try:
         data = json.loads(request.body)
@@ -614,22 +851,29 @@ def measure_piece(request):
         
         game_obj = get_object_or_404(Game, id=game_id)
         
+        # Get or create quantum game state
         quantum_pieces_data = game_obj.quantum_pieces if game_obj.quantum_pieces else []
+        
+        # Create a new QuantumGame instance
         quantum_game = QuantumGame()
         quantum_game.quantum_mode = True
         
+        # Load existing quantum pieces
         for qp_data in quantum_pieces_data:
             qp = QPiece(qp_data.get('position', 'a1'), qp_data.get('piece'))
             qp.qnum = qp_data.get('qnum', {'0': [qp_data.get('position', 'a1'), 1]})
             quantum_game.quantum_pieces.append(qp)
         
+        # Measure the piece
         result = quantum_game.measure_piece(square)
         
         if result:
             final_pos, prob = result
             
+            # Update the board - place piece at measured position
             board = chess.Board(fen=game_obj.fen_position)
             
+            # Find the piece type from quantum pieces
             measured_piece = None
             for qp in quantum_game.quantum_pieces:
                 for state_id, state_data in qp.qnum.items():
@@ -639,6 +883,7 @@ def measure_piece(request):
                 if measured_piece:
                     break
             
+            # Remove piece from all quantum positions and place at final position
             if measured_piece:
                 new_quantum_pieces = []
                 for qp in quantum_game.quantum_pieces:
@@ -649,55 +894,74 @@ def measure_piece(request):
                             break
                     
                     if not is_measured:
-                        new_quantum_pieces.append({'piece': str(qp.piece), 'qnum': qp.qnum, 'entangled': [[str(e[0].piece) if e[0] else None, e[1], e[2]] for e in qp.ent]})
+                        new_quantum_pieces.append({
+                            'piece': str(qp.piece),
+                            'qnum': qp.qnum,
+                            'entangled': [[str(e[0].piece) if e[0] else None, e[1], e[2]] for e in qp.ent]
+                        })
                 
                 game_obj.quantum_pieces = new_quantum_pieces
             
-            # FIXED: Update the board with the measured piece position
-            if measured_piece and final_pos:
-                board.remove_piece_at(chess.parse_square(square))
-                board.set_piece_at(chess.parse_square(final_pos), measured_piece)
-            
+            # Save updated game state
             game_obj.fen_position = board.fen()
-            game_obj.status = update_game_status(board, game_obj.quantum_pieces)
             game_obj.save()
             
             return JsonResponse({
-                'success': True, 
-                'message': f'Piece at {square} measured and collapsed to {final_pos}', 
-                'final_position': final_pos, 
-                'probability': prob, 
-                'fen': game_obj.fen_position, 
-                'quantum_pieces': game_obj.quantum_pieces,
-                'move_type': 'measure'
+                'success': True,
+                'message': f'Piece at {square} measured and collapsed to {final_pos}',
+                'final_position': final_pos,
+                'probability': prob,
+                'fen': game_obj.fen_position,
+                'quantum_pieces': game_obj.quantum_pieces
             })
         
-        return JsonResponse({'success': False, 'error': f'No quantum piece found at {square}'}, status=400)
+        return JsonResponse({
+            'success': False,
+            'error': f'No quantum piece found at {square}'
+        }, status=400)
+
+        
     except Exception as e:
-        return JsonResponse({'success': False, 'error': str(e)}, status=500)
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
 
 
 def get_game_state(request, game_id):
-    """FIXED: Corrected syntax error in JSON response"""
+    """
+    API endpoint to get the current game state.
+    """
     game_obj = get_object_or_404(Game, id=game_id)
     
+    # Get all moves
     moves = Move.objects.filter(game=game_obj).order_by('move_number', 'is_white_move')
     move_list = []
     for m in moves:
-        move_list.append({'number': m.move_number, 'is_white': m.is_white_move, 'san': m.san, 'type': m.move_type})
+        move_list.append({
+            'number': m.move_number,
+            'is_white': m.is_white_move,
+            'san': m.san,
+            'type': m.move_type,
+        })
     
     return JsonResponse({
-        'game_id': game_obj.id, 
-        'fen': game_obj.fen_position,  # FIXED: was 'game,' which is undefined
-        'turn': 'white' if game_obj.current_turn else 'black', 
-        'quantum_mode': game_obj.quantum_mode, 
-        'status': game_obj.status, 
-        'moves': move_list, 
-        'quantum_pieces': game_obj.quantum_pieces if game_obj.quantum_pieces else []
+        'game_id': game_obj.id,
+        'fen': game_obj.fen_position,
+        'turn': 'white' if game_obj.current_turn else 'black',
+        'quantum_mode': game_obj.quantum_mode,
+        'status': game_obj.status,
+        'moves': move_list,
+        'quantum_pieces': game_obj.quantum_pieces if game_obj.quantum_pieces else [],
     })
 
 
-def game_list(request):
-    games = Game.objects.all()[:20]
-    return render(request, 'quantum_chess/game_list.html', {'games': games})
 
+def game_list(request):
+    """
+    View to list all games.
+    """
+    games = Game.objects.all()[:20]
+    return render(request, 'quantum_chess/game_list.html', {
+        'games': games,
+    })
